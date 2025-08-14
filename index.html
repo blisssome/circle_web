@@ -85,10 +85,10 @@
   <script>
     // ------- Math helpers -------
     const TAU = Math.PI * 2;
+    const DEG = Math.PI / 180;
     function cross(a,b){ return {x:a.y*b.z - a.z*b.y, y:a.z*b.x - a.x*b.z, z:a.x*b.y - a.y*b.x}; }
-    function norm(v){ const n = Math.hypot(v.x,v.y,v.z)||1; return {x:v.x/n, y:v.y/n, z:v.z/n}; }
-
-    // ------- Tracer -------
+    function norm(v){ const n = Math.hypot(v.x,v.y,v.z)||1; return {x:v.x/n,y:v.y/n,z:v.z/n}; }
+  
     class ShortMotionTracer {
       constructor(canvas, dotEl){
         this.canvas = canvas;
@@ -96,40 +96,48 @@
         this.dotEl = dotEl;
         this.dpr = Math.max(1, window.devicePixelRatio || 1);
         this.resize();
-
-        // Gravity LPF
-        this.g = null; // {x,y,z}
-        this.gTau = 0.25; // s
-        this.gUpdateGyroMax = 60; // deg/s
-
-        // State
-        this.theta = 0; // radians
-        this.rMeters = 0.12; // default radius
-        this.rLP = null;
-
-        // Thresholds (tweak to taste)
-        this.omegaMin = 30 * Math.PI/180; // rad/s
-        this.accPlanarMin = 0.8;          // m/s^2
-        this.rMin = 0.03;                 // meters
-        this.rMax = 0.50;                 // meters
-
-        // Scaling
-        this.pxPerMeter = 600;            // 0.15 m ≈ 90 px
-
-        // Resets
-        this.lastMotion = performance.now();
-        this.motionTimeoutMs = 700;
-
-        // UI smoothing for dot
-        this.uiX = 0; this.uiY = 0; this.uiAlpha = 0.25;
-
-        // Path style
-        this.strokeStyle = 'rgba(255,255,255,0.95)';
-        this.fillStyle = 'rgba(255,255,255,0.95)';
-        this.resetCanvas();
         window.addEventListener('resize', () => { this.resize(); this.resetCanvas(); }, {passive:true});
+  
+        // Gravity LPF (from accelerationIncludingGravity)
+        this.g = null;
+        this.gTau = 0.25;            // s
+        this.gUpdateGyroMax = 60;    // deg/s
+  
+        // Circle model & gates
+        this.omegaMin = 35 * DEG;    // rad/s about gravity (increase to be stricter)
+        this.accPlanarMin = 1.1;     // m/s^2 (lower if too strict)
+        this.rMin = 0.03;            // meters (3 cm)
+        this.rMax = 0.50;            // meters (50 cm)
+  
+        // Progress / detection
+        this.progress = 0;                 // 0..1 towards ~full revolution
+        this.progressTarget = TAU * 0.92;  // ~330°
+        this.theta = 0;                    // integrated angle
+        this.thetaStart = 0;
+        this.posDur = 0; this.negDur = 0;  // direction coherence timers
+        this.signCoherenceMin = 0.85;      // mostly one direction
+        this.segStartT = null;
+        this.segMinDur = 0.6;              // s (too short → reject)
+        this.segMaxDur = 4.0;              // s (too long → reject)
+        this.gapMsAllow = 220;             // allow brief gate drops
+        this.lastGoodMs = 0;
+  
+        // Radius estimate (smoothed)
+        this.rLP = null;
+        this.rLPalpha = 0.2;
+  
+        // UI cadence
+        this.uiX = 0; this.uiY = 0; this.uiAlpha = 0.25;
+        this.pxPerMeter = 600;
+  
+        // Reset visuals
+        this.resetCanvas();
+  
+        // Debounce detection
+        this.lastDetection = 0;
+        this.cooldownMs = 2000;
       }
-
+  
       resize(){
         const cw = this.canvas.clientWidth, ch = this.canvas.clientHeight;
         this.canvas.width = Math.floor(cw * this.dpr);
@@ -139,27 +147,29 @@
         this.ctx.setTransform(1,0,0,1,0,0);
         this.ctx.lineWidth = 2*this.dpr;
         this.ctx.lineCap='round'; this.ctx.lineJoin='round';
-        this.ctx.strokeStyle = this.strokeStyle;
-        this.ctx.fillStyle = this.fillStyle;
+        this.ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+        this.ctx.fillStyle = 'rgba(255,255,255,0.95)';
       }
-
+  
       resetCanvas(){
         this.ctx.clearRect(0,0,this.w,this.h);
-        // faint boundary circle
         this.ctx.save();
         this.ctx.globalAlpha = 0.18;
         this.ctx.beginPath(); this.ctx.arc(this.cx, this.cy, Math.min(this.cx,this.cy)-4*this.dpr, 0, TAU);
-        this.ctx.stroke();
-        this.ctx.restore();
+        this.ctx.stroke(); this.ctx.restore();
         this.pathStarted = false;
+        // also reset path state
+        this.progress = 0; this.theta = 0; this.thetaStart = 0;
+        this.posDur = 0; this.negDur = 0; this.segStartT = null; this.rLP = null;
+        this._renderProgress();
       }
-
+  
       addSample(wx_deg, wy_deg, wz_deg, acc, accG){
         const now = performance.now();
         const dt = (this._lastT ? Math.max(0.001, (now - this._lastT)/1000) : 0.016);
         this._lastT = now;
-
-        // Gravity estimate from accelerationIncludingGravity (LPF while gyro is calm)
+  
+        // Gravity LPF
         if (accG) {
           if (!this.g) this.g = {x:accG.x||0, y:accG.y||0, z:accG.z||0};
           const gyroMag = Math.hypot(wx_deg,wy_deg,wz_deg);
@@ -171,138 +181,201 @@
           }
         }
         if (!this.g) return;
-
-        // Linear accel: prefer e.acceleration, fallback to aInclG - g
+  
+        // Linear accel (prefer e.acceleration, else aInclG - g)
         let ax=0, ay=0, az=0;
         if (acc && [acc.x,acc.y,acc.z].every(v => typeof v === 'number')) {
           ax=acc.x||0; ay=acc.y||0; az=acc.z||0;
         } else if (accG) {
           ax=(accG.x||0)-this.g.x; ay=(accG.y||0)-this.g.y; az=(accG.z||0)-this.g.z;
         }
-
-        // Build plane ⟂ gravity
+  
+        // World plane ⟂ gravity
         const gn = norm(this.g);
         const ref = (Math.abs(gn.z) < 0.9) ? {x:0,y:0,z:1} : {x:1,y:0,z:0};
         const e1 = norm(cross(gn, ref));   // plane axis #1
-        const e2 = cross(gn, e1);          // plane axis #2 (already unit)
-
-        // Planar acceleration (u,v)
+        const e2 = cross(gn, e1);          // plane axis #2
+  
+        // Planar acceleration components
         const dotg = ax*gn.x + ay*gn.y + az*gn.z;
         const px = ax - dotg*gn.x, py = ay - dotg*gn.y, pz = az - dotg*gn.z;
         const u = px*e1.x + py*e1.y + pz*e1.z;
         const v = px*e2.x + py*e2.y + pz*e2.z;
         const aPlanar = Math.hypot(u,v);
-
-        // Angular velocity about plane normal (project gyro onto gn), in rad/s
-        const w_par_deg = wx_deg*gn.x + wy_deg*gn.y + wz_deg*gn.z;
-        const w_par = w_par_deg * Math.PI/180;
-
+  
+        // Angular velocity about plane normal (deg/s -> rad/s)
+        const w_par = (wx_deg*gn.x + wy_deg*gn.y + wz_deg*gn.z) * DEG;
+  
+        // --- Gating: only integrate when it "looks like a circle" ---
+        const gate =
+          Math.abs(w_par) >= this.omegaMin &&
+          aPlanar >= this.accPlanarMin;
+  
         // Update UI text
         document.getElementById('gyroData').textContent =
           `X: ${wx_deg.toFixed(1)}, Y: ${wy_deg.toFixed(1)}, Z: ${wz_deg.toFixed(1)}`;
         document.getElementById('planarA').textContent = aPlanar.toFixed(2);
-
-        // Motion gate (ignore tiny wobble / flips without centripetal evidence)
-        const active = (Math.abs(w_par) > this.omegaMin) && (aPlanar > this.accPlanarMin);
-
-        if (active) {
-          // Integrate angle
-          this.theta += w_par * dt;
-
-          // Estimate radius via r = a / ω² (clamped, smoothed)
+  
+        if (gate) {
+          // Radius estimate r = a / ω^2 (clamped)
           const rEst = Math.max(this.rMin, Math.min(this.rMax, aPlanar / (w_par*w_par + 1e-6)));
-          this.rLP = (this.rLP==null) ? rEst : (this.rLP + 0.2*(rEst - this.rLP));
-          this.rMeters = this.rLP;
-          document.getElementById('radiusEst').textContent = Math.round(this.rMeters*100).toString();
-
-          this.drawPoint();
-          this.lastMotion = now;
-
-          // Activity bar ~ how strong the window is
-          const activity = Math.max(0, Math.min(1, (aPlanar-0.6)/3.0));
-          this.setActivity(activity);
+          if (rEst >= this.rMin && rEst <= this.rMax) {
+            this.rLP = (this.rLP==null) ? rEst : (this.rLP + this.rLPalpha*(rEst - this.rLP));
+  
+            // start segment on first valid gated sample
+            if (this.segStartT == null) {
+              this.segStartT = now;
+              this.thetaStart = this.theta;
+              this.posDur = 0; this.negDur = 0;
+            }
+  
+            // integrate angle
+            const dtheta = w_par * dt;
+            this.theta += dtheta;
+            if (dtheta > 0) this.posDur += dt; else if (dtheta < 0) this.negDur += dt;
+  
+            // progress based on *signed* angle since segment start
+            const traveled = Math.abs(this.theta - this.thetaStart);
+            this.progress = Math.min(1, traveled / this.progressTarget);
+            this._renderProgress();
+  
+            // draw point on canvas
+            this._drawPoint(this.theta, this.rLP ?? rEst);
+  
+            this.lastGoodMs = now;
+          } else {
+            // radius out of bounds -> treat as gate drop
+            this._maybePauseOrReset(now);
+          }
         } else {
-          // If motion paused for a bit, reset path
-          this.setActivity(0.0);
-          if (now - this.lastMotion > this.motionTimeoutMs) {
-            this.resetCanvas();
-            this.rLP = null;
+          // gate drop
+          this._maybePauseOrReset(now);
+        }
+  
+        // Move green dot to current point (even if paused, leave it where it was)
+        this._moveDot();
+  
+        // DETECTION: full revolution + coherence + duration window
+        if (this.progress >= 1) {
+          const dur = this.segStartT ? (now - this.segStartT)/1000 : 0;
+          const totalTurn = this.posDur + this.negDur;
+          const signCoh = totalTurn > 0 ? Math.max(this.posDur, this.negDur) / totalTurn : 0;
+  
+          const cooled = (now - this.lastDetection) > this.cooldownMs;
+          const withinDur = (dur >= this.segMinDur && dur <= this.segMaxDur);
+  
+          if (cooled && withinDur && signCoh >= this.signCoherenceMin) {
+            this.lastDetection = now;
+            this._onDetected();
+            this._resetSegment(now);
           }
         }
       }
-
-      drawPoint(){
-        const scale = this.pxPerMeter * this.dpr;
-        const x = this.cx + scale*this.rMeters*Math.cos(this.theta);
-        const y = this.cy + scale*this.rMeters*Math.sin(this.theta);
-
-        if (!this.pathStarted) {
-          this.ctx.beginPath(); this.ctx.moveTo(x,y);
-          this.pathStarted = true;
-        } else {
-          this.ctx.lineTo(x,y); this.ctx.stroke();
+  
+      _maybePauseOrReset(nowMs){
+        if (this.segStartT != null) {
+          if (!this.lastGoodMs) this.lastGoodMs = nowMs;
+          if ((nowMs - this.lastGoodMs) > this.gapMsAllow) {
+            // too long without valid samples -> reset segment (keep drawn path)
+            this._resetSegment(nowMs);
+          }
         }
-
-        // Move green dot to the current position (smooth)
+        // decay progress display a bit so shakes don't stick at 100
+        this.progress = Math.max(0, this.progress - 0.02);
+        this._renderProgress();
+      }
+  
+      _resetSegment(nowMs){
+        this.segStartT = null;
+        this.thetaStart = this.theta;  // keep absolute theta but start fresh progress
+        this.progress = 0;
+        this.posDur = 0; this.negDur = 0;
+        this.lastGoodMs = nowMs;
+        this.rLP = null;
+        this._renderProgress();
+      }
+  
+      _renderProgress(){
+        const pct = Math.round(this.progress * 100);
+        document.getElementById('confidenceBar').style.width = pct + '%';
+        document.getElementById('confidenceText').textContent = `Revolution progress: ${pct}%`;
+      }
+  
+      _drawPoint(theta, r){
+        const scale = this.pxPerMeter * this.dpr;
+        const x = this.cx + scale*r*Math.cos(theta);
+        const y = this.cy + scale*r*Math.sin(theta);
+        if (!this.pathStarted) { this.ctx.beginPath(); this.ctx.moveTo(x,y); this.pathStarted = true; }
+        else { this.ctx.lineTo(x,y); this.ctx.stroke(); }
+        this._lastX = x; this._lastY = y;
+      }
+  
+      _moveDot(){
+        if (this._lastX == null) return;
         const cssW = this.canvas.clientWidth, cssH = this.canvas.clientHeight;
-        const cssX = (x/this.dpr) - cssW/2;
-        const cssY = (y/this.dpr) - cssH/2;
+        const cssX = (this._lastX/this.dpr) - cssW/2;
+        const cssY = (this._lastY/this.dpr) - cssH/2;
         this.uiX += this.uiAlpha * (cssX - this.uiX);
         this.uiY += this.uiAlpha * (cssY - this.uiY);
         this.dotEl.style.transform = `translate(calc(-50% + ${this.uiX}px), calc(-50% + ${this.uiY}px))`;
       }
-
-      setActivity(p){
-        const pct = Math.round(p*100);
-        document.getElementById('confidenceBar').style.width = pct + '%';
-        document.getElementById('confidenceText').textContent = `Path activity: ${pct}%`;
+  
+      _onDetected(){
+        // Visual flash + history + status
+        document.body.style.background = 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)';
+        setTimeout(() => { document.body.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'; }, 700);
+  
+        const status = document.getElementById('status');
+        status.textContent = '🎉 FULL WRIST REVOLUTION';
+        status.className = 'status detecting';
+        if ('vibrate' in navigator) navigator.vibrate([180,100,180]);
+        setTimeout(() => { status.textContent = 'Listening… draw a small wrist circle'; status.className = 'status active'; }, 1500);
+  
+        const div = document.createElement('div');
+        div.className = 'detection-item';
+        div.textContent = new Date().toLocaleTimeString() + ': Full revolution';
+        document.getElementById('history').appendChild(div);
       }
     }
-
-    // ------- Wire up to DeviceMotion -------
+  
+    // ------- Wire up to DeviceMotion (keep your existing buttons/HTML) -------
     let tracer = null, isActive = false;
-
+  
     function startDetection(){
       const needsPerm = typeof DeviceMotionEvent !== 'undefined' &&
                         typeof DeviceMotionEvent.requestPermission === 'function';
       if (needsPerm) {
-        DeviceMotionEvent.requestPermission().then(state => {
-          if (state === 'granted') start();
-          else alert('Motion permission denied. Enable it in Settings.');
-        }).catch(e => { console.error(e); alert('Permission request failed.'); });
-      } else {
-        start();
-      }
+        DeviceMotionEvent.requestPermission()
+          .then(state => { if (state === 'granted') start(); else alert('Motion permission denied.'); })
+          .catch(e => { console.error(e); alert('Permission request failed.'); });
+      } else { start(); }
     }
-
+  
     function start(){
       if (isActive) return;
       const canvas = document.getElementById('pathCanvas');
       const dot = document.getElementById('gyroDot');
       tracer = new ShortMotionTracer(canvas, dot);
-
       window.addEventListener('devicemotion', onMotion, { passive: true });
       isActive = true;
-
+  
       document.getElementById('status').textContent = 'Listening… draw a small wrist circle';
       document.getElementById('status').className = 'status active';
       document.getElementById('startBtn').style.display = 'none';
       document.getElementById('stopBtn').style.display = 'inline-block';
-      console.log('▶️ Tracing started');
     }
-
+  
     function stopDetection(){
       if (!isActive) return;
       window.removeEventListener('devicemotion', onMotion);
       isActive = false;
-
+  
       document.getElementById('status').textContent = 'Detection stopped';
       document.getElementById('status').className = 'status';
       document.getElementById('startBtn').style.display = 'inline-block';
       document.getElementById('stopBtn').style.display = 'none';
-      console.log('⏹️ Tracing stopped');
     }
-
+  
     function onMotion(e){
       const rr = e.rotationRate || {};
       tracer.addSample(
@@ -313,21 +386,19 @@
         e.accelerationIncludingGravity || null
       );
     }
-
+  
     function clearHistory(){
       document.getElementById('history').innerHTML = '';
       document.getElementById('confidenceBar').style.width = '0%';
-      document.getElementById('confidenceText').textContent = 'Path activity: 0%';
+      document.getElementById('confidenceText').textContent = 'Revolution progress: 0%';
       if (tracer) tracer.resetCanvas();
     }
-
-    // Feedback when we believe we traced a full-ish loop (optional)
-    // You can add a simple loop-detection if you want by checking |Δθ| ~ 2π in ~2–4 s window.
-
+  
     window.addEventListener('load', () => {
-      console.log('✅ Ready. Keep the phone’s orientation fairly steady and rotate your wrist in a small circle (≤ ~2s).');
-      console.log('ℹ️ This draws a plausible path for short motions only; it will drift for long durations.');
+      console.log('✅ Progress now reflects actual rotation (toward ~330°).');
+      console.log('🧰 Flip/jerk moves won’t count: they fail the ω and radius gates.');
     });
   </script>
+  
 </body>
 </html>
