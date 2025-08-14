@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Rapid Wrist Circle — Noise-Hardened (No Prompts)</title>
+<title>Enhanced Circular Motion Detector</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{
@@ -27,15 +27,16 @@
     box-shadow:inset 0 0 0 2px rgba(255,255,255,.08);overflow:hidden
   }
   canvas#pathCanvas{width:100%;height:100%;display:block}
-  #gyroDot{
-    position:absolute;width:10px;height:10px;border-radius:50%;
+  #motionDot{
+    position:absolute;width:12px;height:12px;border-radius:50%;
     background:#4CAF50;top:50%;left:50%;transform:translate(-50%,-50%);
-    box-shadow:0 0 0 2px rgba(0,0,0,.12);transition:transform .06s linear
+    box-shadow:0 0 0 2px rgba(0,0,0,.12);transition:transform .08s ease
   }
-  .confidence-bar{width:100%;height:18px;background:rgba(255,255,255,.2);border-radius:10px;overflow:hidden;margin:8px 0}
-  .confidence-fill{height:100%;width:0%;background:linear-gradient(90deg,#4CAF50,#FFC107,#FF5722);border-radius:10px;transition:width .18s ease}
-  .data-display{background:rgba(0,0,0,.22);border-radius:10px;padding:10px;margin-top:10px;
+  .progress-bar{width:100%;height:18px;background:rgba(255,255,255,.2);border-radius:10px;overflow:hidden;margin:8px 0}
+  .progress-fill{height:100%;width:0%;background:linear-gradient(90deg,#4CAF50,#FFC107,#FF5722);border-radius:10px;transition:width .2s ease}
+  .data-display{background:rgba(0,0,0,.22);border-radius:10px;padding:12px;margin-top:12px;
     font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;font-size:12px;text-align:left}
+  .data-row{display:flex;justify-content:space-between;margin:4px 0}
   .detection-history{max-height:160px;overflow-y:auto;background:rgba(0,0,0,.22);border-radius:10px;padding:10px;margin-top:12px;text-align:left}
   .detection-item{padding:4px 0;border-bottom:1px solid rgba(255,255,255,.12);font-size:13px}
   button{
@@ -45,33 +46,48 @@
   button:hover{background:rgba(255,255,255,.28);transform:translateY(-1px)}
   button:active{transform:translateY(0)}
   #sensorNotice{display:none;margin-top:8px;padding:10px;border-radius:10px;background:rgba(255,107,107,.18);border:1px solid rgba(255,107,107,.5);font-size:13px;text-align:left}
+  .circle-indicator{
+    position:absolute;
+    top:10px;
+    left:10px;
+    width:20px;
+    height:20px;
+    border:2px solid rgba(255,255,255,.4);
+    border-radius:50%;
+    border-top:2px solid #4CAF50;
+    display:none;
+    animation:spin 1s linear infinite;
+  }
+  @keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
   <div class="container">
-    <h1>🔄 Rapid Wrist Circle — Noise-Hardened</h1>
+    <h1>🔄 Enhanced Circular Motion Detector</h1>
 
-    <div id="status" class="status">Tap “Start”, hold still 1s, then do ONE quick wrist circle</div>
+    <div id="status" class="status">Hold phone steady, move your arm in circles</div>
 
     <div class="visual">
       <canvas id="pathCanvas"></canvas>
-      <div id="gyroDot"></div>
+      <div id="motionDot"></div>
+      <div id="circleIndicator" class="circle-indicator"></div>
     </div>
 
-    <div class="confidence-bar"><div id="confidenceBar" class="confidence-fill"></div></div>
-    <div id="confidenceText">Revolution progress: 0%</div>
+    <div class="progress-bar"><div id="progressBar" class="progress-fill"></div></div>
+    <div id="progressText">Circular motion: 0%</div>
 
     <div>
-      <button id="startBtn" onclick="startDetection()">Start</button>
+      <button id="startBtn" onclick="startDetection()">Start Detection</button>
       <button id="stopBtn" onclick="stopDetection()" style="display:none;">Stop</button>
       <button onclick="clearHistory()">Clear History</button>
     </div>
 
     <div class="data-display">
-      <div>a⟂g bandpass (m/s²): <span id="aBP">0.00</span></div>
-      <div>φ̇ (deg/s): <span id="omegaPhi">0</span></div>
-      <div>yaw gyro (deg/s): <span id="yaw">0</span></div>
-      <div>valid%: <span id="vfrac">0%</span></div>
+      <div class="data-row"><span>Centripetal Accel:</span> <span id="centripetal">0.00 m/s²</span></div>
+      <div class="data-row"><span>Angular Velocity:</span> <span id="angularVel">0 °/s</span></div>
+      <div class="data-row"><span>Circle Quality:</span> <span id="quality">0%</span></div>
+      <div class="data-row"><span>Motion Energy:</span> <span id="energy">0.00</span></div>
+      <div class="data-row"><span>Radius Est:</span> <span id="radius">0 cm</span></div>
     </div>
 
     <div class="detection-history">
@@ -81,375 +97,486 @@
 
     <div id="sensorNotice">
       <strong>No motion data received.</strong><br>
-      iPhone/iPad: Safari → “aA” → Website Settings → Motion & Orientation Access → ON, then reload.<br>
+      iPhone/iPad: Safari → "aA" → Website Settings → Motion & Orientation Access → ON, then reload.<br>
       Android Chrome: lock icon → Site settings → Motion sensors → Allow.
     </div>
   </div>
 
 <script>
-/* ================= Core ================= */
-const TAU = Math.PI*2, DEG = Math.PI/180;
-const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
-const unwrap=d=>(d>Math.PI?d-TAU:d<-Math.PI?d+TAU:d);
-const hypot3=(x,y,z)=>Math.sqrt(x*x+y*y+z*z);
-function cross(a,b){return {x:a.y*b.z-a.z*b.y,y:a.z*b.x-a.x*b.z,z:a.x*b.y-a.y*b.x};}
-function norm(v){const n=hypot3(v.x,v.y,v.z)||1;return {x:v.x/n,y:v.y/n,z:v.z/n};}
-function median(a){if(!a.length)return 0;const s=[...a].sort((x,y)=>x-y);const m=Math.floor(s.length/2);return s.length%2?s[m]:(s[m-1]+s[m])/2;}
-function mad(a,m=null){if(!a.length)return 0;if(m==null)m=median(a);const d=a.map(x=>Math.abs(x-m));return median(d);}
+const TAU = Math.PI * 2;
+const DEG = 180 / Math.PI;
 
-class RapidCircleHardened {
-  constructor(canvas,dot){
-    // ----- Targets & windows -----
-    this.progressTarget = TAU*0.90;   // ~324°
-    this.segMinDur = 0.15;            // very fast allowed
-    this.segMaxDur = 2.20;            // must be rapid
-    this.gapMsAllow = 150;            // short drop tolerance
-
-    // Band-pass accel (~0.6–6 Hz)
-    this.hpTau = 0.25;                // HP ~0.64 Hz
-    this.lpTau = 0.06;                // LP ~2.6 Hz (snappy)
-
-    // Direction smoothing on unit vector (stabilizes angle)
-    this.dirTau = 0.08;               // ~80 ms
-
-    // Minimums (auto-calibrated, then clamped)
-    this.aBPmin = 0.45;               // m/s² (bandpass)
-    this.omegaPhiMin = 1.3;           // rad/s (~75°/s)
-    this.omegaPhiOff = 1.0;
-
-    // Segment quality
-    this.minValidFrac = 0.60;         // ≥60% valid samples
-    this.minAvgABP    = 0.60;         // average bandpassed accel
-    this.minPlanarRMS = 0.30;         // RMS of raw planar accel (reject spin-only)
-
-    // Spin-in-place veto (gyro)
-    this.yawVetoDeg   = 80;           // deg/s about gravity
-    this.gyroMagVeto  = 180;          // total deg/s if linear motion weak
-
-    // Signed accumulation
-    this.signTau = 0.15;              // ~150 ms EWMA to decide direction
-    this.flipResetMs = 120;           // if sign flips and persists, reset
-
-    // UI / canvas
-    this.canvas=canvas; this.ctx=canvas.getContext('2d'); this.dot=dot;
-    this.dpr=Math.max(1,window.devicePixelRatio||1);
-    this.uiAlpha=0.25; this._uiX=0; this._uiY=0;
-
-    // State
-    this.lastT=0; this.g=null;
-
-    // plane bases
-    this.e1={x:1,y:0,z:0}; this.e2={x:0,y:1,z:0};
-
-    // band-pass states
-    this.uPrev=0; this.vPrev=0;   // for HP
-    this.uHP=0; this.vHP=0;
-    this.uBP=0; this.vBP=0;
-
-    // unit direction smoothing
-    this.udX=1; this.udY=0;       // smoothed unit vector
-
-    // angle stuff
-    this.prevPhi=null;            // angle of smoothed unit vector
-    this.turnSigned=0;            // accumulate only chosen sign
-    this.progress=0;
-    this.segStart=null; this.lastGoodMs=0;
-
-    // quality stats
-    this.validCount=0; this.totalCount=0; this.sumABP=0;
-    this.sqSumPlanar=0;
-
-    // direction decision
-    this.signEW=0; this.currentSign=0; this.flipStart=0;
-
-    // gyro
-    this.yawDeg=0; this.gyroMag=0;
-
-    // calibration
-    this.calibrating=true; this.calStart=performance.now(); this.cA=[]; this.cW=[];
+class CircularMotionDetector {
+  constructor(canvas, dot, indicator) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.dot = dot;
+    this.indicator = indicator;
+    
+    // Detection parameters
+    this.minCircleTime = 0.5;      // Minimum time for one circle (seconds)
+    this.maxCircleTime = 3.0;      // Maximum time for one circle
+    this.minRadius = 0.15;         // Minimum radius in meters
+    this.maxRadius = 0.8;          // Maximum radius in meters
+    this.qualityThreshold = 0.7;   // Minimum circle quality (0-1)
+    this.minCentripetalAccel = 1.0; // Minimum centripetal acceleration
+    
+    // State variables
+    this.isCalibrating = true;
+    this.calibrationStart = 0;
+    this.gravity = null;
+    this.lastTime = 0;
+    this.motionHistory = [];
+    this.maxHistoryLength = 150; // ~3 seconds at 50Hz
+    
+    // Circular motion tracking
+    this.circleProgress = 0;
+    this.currentAngle = 0;
+    this.lastAngle = null;
+    this.totalRotation = 0;
+    this.circleStartTime = 0;
+    this.centerX = 0;
+    this.centerY = 0;
+    this.estimatedRadius = 0;
+    
+    // Smoothing
+    this.smoothedAccel = { x: 0, y: 0 };
+    this.smoothedVel = { x: 0, y: 0 };
+    this.smoothingFactor = 0.1;
+    
     this._setupCanvas();
+    this._resetDetection();
   }
-
-  _setupCanvas(){
-    const cw=this.canvas.clientWidth, ch=this.canvas.clientHeight;
-    this.canvas.width=Math.floor(cw*this.dpr);
-    this.canvas.height=Math.floor(ch*this.dpr);
-    this.w=this.canvas.width; this.h=this.canvas.height;
-    this.cx=this.w/2; this.cy=this.h/2;
-    this.padPx=6*this.dpr;
-    this.R=Math.min(this.cx,this.cy)-this.padPx;
-    this.rDraw=this.R*0.70;
-    this.ctx.setTransform(1,0,0,1,0,0);
-    this.ctx.lineWidth=2*this.dpr; this.ctx.lineCap='round'; this.ctx.lineJoin='round';
-    this.ctx.strokeStyle='rgba(255,255,255,.95)';
-    this._resetCanvas();
-    window.addEventListener('resize',()=>this._setupCanvas(),{passive:true});
+  
+  _setupCanvas() {
+    const rect = this.canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    
+    this.canvas.width = rect.width * dpr;
+    this.canvas.height = rect.height * dpr;
+    this.ctx.scale(dpr, dpr);
+    
+    this.canvasWidth = rect.width;
+    this.canvasHeight = rect.height;
+    this.centerX = this.canvasWidth / 2;
+    this.centerY = this.canvasHeight / 2;
+    this.maxRadius = Math.min(this.canvasWidth, this.canvasHeight) * 0.4;
+    
+    this.ctx.lineWidth = 2;
+    this.ctx.lineCap = 'round';
+    this._clearCanvas();
   }
-
-  _resetCanvas(){
-    this.ctx.clearRect(0,0,this.w,this.h);
-    this.ctx.save(); this.ctx.globalAlpha=.18;
-    this.ctx.beginPath(); this.ctx.arc(this.cx,this.cy,this.R,0,TAU); this.ctx.stroke(); this.ctx.restore();
-    this.ctx.save(); this.ctx.beginPath(); this.ctx.arc(this.cx,this.cy,this.R-this.ctx.lineWidth*0.5,0,TAU); this.ctx.clip();
-    this.pathStarted=false;
-
-    this.prevPhi=null; this.turnSigned=0; this.progress=0;
-    this.segStart=null; this.lastGoodMs=0;
-    this.validCount=this.totalCount=this.sumABP=0; this.sqSumPlanar=0;
-    this.signEW=0; this.currentSign=0; this.flipStart=0;
-
-    this._lastXPix=this.cx; this._lastYPix=this.cy;
-    this._renderProgress(); this._moveDot();
+  
+  _clearCanvas() {
+    this.ctx.clearRect(0, 0, this.canvasWidth, this.canvasHeight);
+    
+    // Draw reference circle
+    this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    this.ctx.beginPath();
+    this.ctx.arc(this.centerX, this.centerY, this.maxRadius * 0.8, 0, TAU);
+    this.ctx.stroke();
+    
+    // Reset path
+    this.pathStarted = false;
   }
-
-  addSample(acc,accG,rr){
-    const now=performance.now();
-    const dt=this.lastT?Math.max(0.001,(now-this.lastT)/1000):0.016;
-    this.lastT=now;
-
-    // ----- Gravity estimate -----
-    if(!this.g){
-      if(accG && Number.isFinite(accG.x)) this.g={x:accG.x,y:accG.y,z:accG.z};
-      else if(acc && Number.isFinite(acc.x)){ const m=hypot3(acc.x,acc.y,acc.z); if(m>7.5) this.g={x:acc.x,y:acc.y,z:acc.z}; else return; }
-      else return;
-    } else {
-      const a=Math.exp(-dt/0.25);
-      if(accG && Number.isFinite(accG.x)){
-        this.g.x=a*this.g.x+(1-a)*accG.x; this.g.y=a*this.g.y+(1-a)*accG.y; this.g.z=a*this.g.z+(1-a)*accG.z;
-      }
-    }
-    const gn=norm(this.g);
-    const ref=Math.abs(gn.z)<0.9?{x:0,y:0,z:1}:{x:1,y:0,z:0};
-    this.e1 = norm(cross(gn,ref));
-    this.e2 = cross(gn,this.e1);
-
-    // ----- Linear accel → plane -----
-    let ax=0,ay=0,az=0;
-    if(acc && Number.isFinite(acc.x)){ ax=acc.x; ay=acc.y; az=acc.z; }
-    else if(accG){ ax=accG.x-this.g.x; ay=accG.y-this.g.y; az=accG.z-this.g.z; }
-
-    const dotg=ax*gn.x+ay*gn.y+az*gn.z;
-    const px=ax-dotg*gn.x, py=ay-dotg*gn.y, pz=az-dotg*gn.z;
-    let u=px*this.e1.x+py*this.e1.y+pz*this.e1.z;
-    let v=px*this.e2.x+py*this.e2.y+pz*this.e2.z;
-    const planarMag = Math.hypot(u,v);
-
-    // ----- Band-pass (HP then LP) -----
-    const aHP = this.hpTau/(this.hpTau+dt);
-    this.uHP = aHP*(this.uHP + u - this.uPrev);
-    this.vHP = aHP*(this.vHP + v - this.vPrev);
-    this.uPrev = u; this.vPrev = v;
-
-    const aLP = Math.exp(-dt/this.lpTau);
-    this.uBP = aLP*this.uBP + (1-aLP)*this.uHP;
-    this.vBP = aLP*this.vBP + (1-aLP)*this.vHP;
-
-    const aBPmag = Math.hypot(this.uBP,this.vBP);
-
-    // ----- Smoothed unit direction (stabilizes φ) -----
-    let ux = aBPmag>1e-6 ? this.uBP/aBPmag : this.udX;
-    let uy = aBPmag>1e-6 ? this.vBP/aBPmag : this.udY;
-    const dA = Math.exp(-dt/this.dirTau);
-    this.udX = dA*this.udX + (1-dA)*ux;
-    this.udY = dA*this.udY + (1-dA)*uy;
-    const nrm = Math.hypot(this.udX,this.udY)||1;
-    this.udX/=nrm; this.udY/=nrm;
-
-    const phi = Math.atan2(this.udY,this.udX);
-    if(this.prevPhi==null) this.prevPhi=phi;
-    const dphi = unwrap(phi - this.prevPhi);
-    this.prevPhi = phi;
-    const phiDot = Math.abs(dphi)/dt;
-
-    // ----- Gyro spin-in-place veto -----
-    if (rr){
-      // project gyro (deg/s) onto gravity axis to get yaw about g
-      this.yawDeg = (rr.beta||0)*gn.x + (rr.gamma||0)*gn.y + (rr.alpha||0)*gn.z;
-      this.gyroMag = Math.hypot(rr.alpha||0, rr.beta||0, rr.gamma||0);
-    } else {
-      this.yawDeg = 0; this.gyroMag = 0;
-    }
-    const spinBlocked = (Math.abs(this.yawDeg) > this.yawVetoDeg) ||
-                        (this.gyroMag > this.gyroMagVeto && aBPmag < 0.8);
-
-    // ----- Draw angle on fixed ring -----
-    const x=this.cx + this.rDraw*Math.cos(phi);
-    const y=this.cy + this.rDraw*Math.sin(phi);
-    if(!this.pathStarted){ this.ctx.beginPath(); this.ctx.moveTo(x,y); this.pathStarted=true; }
-    else { this.ctx.lineTo(x,y); this.ctx.stroke(); }
-    this._lastXPix=x; this._lastYPix=y; this._moveDot();
-
-    // ----- Calibration: get noise floors -----
-    if(this.calibrating){
-      this.cA.push(aBPmag); this.cW.push(phiDot);
-      if(now - this.calStart > 1000){
-        const aMed=median(this.cA), aMAD=mad(this.cA,aMed)*1.4826;
-        const wMed=median(this.cW), wMAD=mad(this.cW,wMed)*1.4826;
-        this.aBPmin = Math.min(0.80, Math.max(0.40, aMed + 6*aMAD));
-        this.omegaPhiMin = Math.min(2.2, Math.max(1.0, wMed + 5*wMAD));
-        this.omegaPhiOff = Math.max(0.8, this.omegaPhiMin*0.75);
-        this.calibrating=false;
-        const st=document.getElementById('status'); if(st){st.textContent='Listening… one quick wrist circle'; st.className='status active';}
-      }
-      this._hud(aBPmag, phiDot, this.yawDeg, 0);
+  
+  _resetDetection() {
+    this.circleProgress = 0;
+    this.totalRotation = 0;
+    this.lastAngle = null;
+    this.circleStartTime = 0;
+    this.motionHistory = [];
+    this.estimatedRadius = 0;
+    this._updateProgress();
+    this._clearCanvas();
+  }
+  
+  addMotionSample(acceleration, accelerationGravity, rotationRate, timestamp) {
+    const now = timestamp || performance.now();
+    const dt = this.lastTime ? (now - this.lastTime) / 1000 : 1/60;
+    this.lastTime = now;
+    
+    // Establish gravity vector
+    if (!this.gravity && accelerationGravity) {
+      this.gravity = {
+        x: accelerationGravity.x,
+        y: accelerationGravity.y,
+        z: accelerationGravity.z
+      };
       return;
     }
-
-    // ----- Validity gating -----
-    const enoughSpeed = phiDot >= (this.segStart?this.omegaPhiOff:this.omegaPhiMin);
-    const valid = !spinBlocked && (aBPmag >= this.aBPmin) && enoughSpeed;
-
-    // Segment stats
-    this.totalCount++;
-    if(valid){ this.validCount++; this.sumABP += aBPmag; }
-    this.sqSumPlanar += planarMag*planarMag;
-
-    // ----- Signed accumulation with flip reset -----
-    // EW sign decision
-    const sDecay = Math.exp(-dt/this.signTau);
-    this.signEW = sDecay*this.signEW + (1-sDecay)*(dphi);
-    const wantSign = Math.sign(this.signEW)||this.currentSign||1;
-
-    if(valid){
-      // if sign flips and persists, reset segment (kill shakes)
-      if(this.currentSign && Math.sign(dphi) && Math.sign(dphi)!==this.currentSign){
-        this.flipStart = this.flipStart || now;
-        if(now - this.flipStart > this.flipResetMs){
-          this._resetSegment(); // start fresh with new direction
-        }
-      } else {
-        this.flipStart = 0;
-      }
-
-      // start segment if needed
-      if(!this.segStart){
-        this.segStart=now; this.turnSigned=0; this.validCount=1; this.totalCount=1; this.sumABP=aBPmag; this.sqSumPlanar=planarMag*planarMag;
-        this.currentSign = wantSign || 1;
-      } else {
-        this.currentSign = wantSign || this.currentSign || 1;
-      }
-
-      // only accumulate same-sign rotation; opposite sign does NOT add
-      const inc = this.currentSign * dphi;
-      if(inc > 0) this.turnSigned += inc;
-
-      const prevProg=this.progress;
-      this.progress = Math.min(1, this.turnSigned / this.progressTarget);
-      this._renderProgress();
-
-      if(prevProg<1 && this.progress>=1){
-        const dur=(now - this.segStart)/1000;
-        const vfrac = this.validCount/Math.max(1,this.totalCount);
-        const avgA  = this.sumABP/Math.max(1,this.validCount);
-        const planarRMS = Math.sqrt(this.sqSumPlanar/Math.max(1,this.totalCount));
-
-        if(dur>=this.segMinDur && dur<=this.segMaxDur &&
-           vfrac>=this.minValidFrac && avgA>=this.minAvgABP &&
-           planarRMS>=this.minPlanarRMS && !spinBlocked){
-          this._onDetected();
-          this._resetSegment();
-        }
-      }
-      this.lastGoodMs = now;
-    } else {
-      if(this.segStart){
-        if(!this.lastGoodMs) this.lastGoodMs=now;
-        if(now - this.lastGoodMs > this.gapMsAllow){
-          this._resetSegment(); this.lastGoodMs=0;
-        }
-      }
-      this.progress=Math.max(0, this.progress - 0.02);
-      this._renderProgress();
+    
+    if (!this.gravity) return;
+    
+    // Update gravity estimate with low-pass filter
+    if (accelerationGravity) {
+      const alpha = 0.02;
+      this.gravity.x = (1 - alpha) * this.gravity.x + alpha * accelerationGravity.x;
+      this.gravity.y = (1 - alpha) * this.gravity.y + alpha * accelerationGravity.y;
+      this.gravity.z = (1 - alpha) * this.gravity.z + alpha * accelerationGravity.z;
     }
-
-    // HUD
-    this._hud(aBPmag, phiDot, this.yawDeg, (this.validCount/Math.max(1,this.totalCount)));
+    
+    // Calculate linear acceleration (remove gravity)
+    let linearAccel = { x: 0, y: 0, z: 0 };
+    if (acceleration) {
+      linearAccel = acceleration;
+    } else if (accelerationGravity) {
+      linearAccel = {
+        x: accelerationGravity.x - this.gravity.x,
+        y: accelerationGravity.y - this.gravity.y,
+        z: accelerationGravity.z - this.gravity.z
+      };
+    }
+    
+    // Smooth the acceleration
+    this.smoothedAccel.x = (1 - this.smoothingFactor) * this.smoothedAccel.x + this.smoothingFactor * linearAccel.x;
+    this.smoothedAccel.y = (1 - this.smoothingFactor) * this.smoothedAccel.y + this.smoothingFactor * linearAccel.y;
+    
+    // Estimate velocity by integration (with decay to prevent drift)
+    const velocityDecay = 0.95;
+    this.smoothedVel.x = this.smoothedVel.x * velocityDecay + this.smoothedAccel.x * dt;
+    this.smoothedVel.y = this.smoothedVel.y * velocityDecay + this.smoothedAccel.y * dt;
+    
+    // Calculate motion metrics
+    const accelMagnitude = Math.sqrt(linearAccel.x**2 + linearAccel.y**2 + linearAccel.z**2);
+    const planarAccelMag = Math.sqrt(this.smoothedAccel.x**2 + this.smoothedAccel.y**2);
+    const velMagnitude = Math.sqrt(this.smoothedVel.x**2 + this.smoothedVel.y**2);
+    
+    // Store motion history
+    const motionSample = {
+      time: now,
+      accel: { x: linearAccel.x, y: linearAccel.y },
+      smoothAccel: { x: this.smoothedAccel.x, y: this.smoothedAccel.y },
+      velocity: { x: this.smoothedVel.x, y: this.smoothedVel.y },
+      accelMag: planarAccelMag,
+      velMag: velMagnitude
+    };
+    
+    this.motionHistory.push(motionSample);
+    if (this.motionHistory.length > this.maxHistoryLength) {
+      this.motionHistory.shift();
+    }
+    
+    // Calibration phase
+    if (this.isCalibrating) {
+      if (this.calibrationStart === 0) {
+        this.calibrationStart = now;
+      }
+      
+      if (now - this.calibrationStart > 1000) { // 1 second calibration
+        this.isCalibrating = false;
+        const status = document.getElementById('status');
+        if (status) {
+          status.textContent = 'Ready! Move your arm in circles';
+          status.className = 'status active';
+        }
+      }
+      this._updateHUD(planarAccelMag, 0, 0, 0, 0);
+      return;
+    }
+    
+    // Detect circular motion
+    this._detectCircularMotion(motionSample, dt);
+    
+    // Update visualization
+    this._updateVisualization(motionSample);
   }
-
-  _resetSegment(){
-    this.segStart=null; this.turnSigned=0; this.progress=0;
-    this.validCount=0; this.totalCount=0; this.sumABP=0; this.sqSumPlanar=0;
-    this.currentSign=0; this.signEW=0; this.flipStart=0;
-    this._renderProgress();
+  
+  _detectCircularMotion(sample, dt) {
+    if (this.motionHistory.length < 10) return;
+    
+    // Calculate instantaneous center of circular motion
+    const recent = this.motionHistory.slice(-20); // Last 20 samples
+    let centerX = 0, centerY = 0, radius = 0, quality = 0;
+    
+    if (recent.length >= 3) {
+      // Estimate circular motion parameters
+      const result = this._estimateCircleParams(recent);
+      centerX = result.centerX;
+      centerY = result.centerY;
+      radius = result.radius;
+      quality = result.quality;
+    }
+    
+    // Calculate angle from estimated center
+    const dx = sample.smoothAccel.x - centerX;
+    const dy = sample.smoothAccel.y - centerY;
+    const currentAngle = Math.atan2(dy, dx);
+    
+    let angularVelocity = 0;
+    if (this.lastAngle !== null) {
+      let deltaAngle = currentAngle - this.lastAngle;
+      
+      // Handle angle wrapping
+      if (deltaAngle > Math.PI) deltaAngle -= TAU;
+      if (deltaAngle < -Math.PI) deltaAngle += TAU;
+      
+      angularVelocity = deltaAngle / dt;
+      
+      // Accumulate rotation if motion quality is good
+      if (quality > 0.4 && Math.abs(angularVelocity) > 0.5) {
+        this.totalRotation += Math.abs(deltaAngle);
+        
+        if (this.circleStartTime === 0) {
+          this.circleStartTime = sample.time;
+        }
+      }
+    }
+    
+    this.lastAngle = currentAngle;
+    this.estimatedRadius = radius;
+    
+    // Calculate progress
+    this.circleProgress = Math.min(1, this.totalRotation / TAU);
+    
+    // Check for complete circle
+    if (this.circleProgress >= 0.95 && this.circleStartTime > 0) {
+      const circleTime = (sample.time - this.circleStartTime) / 1000;
+      
+      if (circleTime >= this.minCircleTime && 
+          circleTime <= this.maxCircleTime && 
+          quality >= this.qualityThreshold &&
+          radius >= this.minRadius && 
+          radius <= this.maxRadius) {
+        
+        this._onCircleDetected(circleTime, radius, quality);
+        this._resetDetection();
+      }
+    }
+    
+    // Reset if motion stops or becomes erratic
+    if (sample.accelMag < 0.5 || quality < 0.2) {
+      if (sample.time - this.circleStartTime > 2000) { // 2 second timeout
+        this._resetDetection();
+      }
+    }
+    
+    // Update UI
+    const centripetalAccel = radius > 0 ? (sample.velMag * sample.velMag) / radius : 0;
+    this._updateHUD(centripetalAccel, angularVelocity * DEG, quality, sample.accelMag, radius);
+    this._updateProgress();
   }
-
-  _renderProgress(){
-    const pct=Math.round(this.progress*100);
-    const bar=document.getElementById('confidenceBar');
-    const txt=document.getElementById('confidenceText');
-    if(bar) bar.style.width=pct+'%';
-    if(txt) txt.textContent=`Revolution progress: ${pct}%`;
+  
+  _estimateCircleParams(samples) {
+    if (samples.length < 3) return { centerX: 0, centerY: 0, radius: 0, quality: 0 };
+    
+    // Use acceleration data to estimate circular motion
+    let sumX = 0, sumY = 0, sumX2 = 0, sumY2 = 0, sumXY = 0;
+    let sumAx = 0, sumAy = 0;
+    
+    for (let i = 0; i < samples.length; i++) {
+      const s = samples[i];
+      const x = s.smoothAccel.x;
+      const y = s.smoothAccel.y;
+      
+      sumX += x;
+      sumY += y;
+      sumX2 += x * x;
+      sumY2 += y * y;
+      sumXY += x * y;
+      sumAx += Math.abs(s.smoothAccel.x);
+      sumAy += Math.abs(s.smoothAccel.y);
+    }
+    
+    const n = samples.length;
+    const meanX = sumX / n;
+    const meanY = sumY / n;
+    
+    // Calculate variance and correlation for quality assessment
+    const varX = (sumX2 / n) - (meanX * meanX);
+    const varY = (sumY2 / n) - (meanY * meanY);
+    const correlation = Math.abs((sumXY / n) - (meanX * meanY)) / Math.sqrt(varX * varY + 1e-10);
+    
+    // Estimate radius from acceleration magnitude
+    const avgAccelMag = Math.sqrt(sumAx * sumAx + sumAy * sumAy) / n;
+    const avgVelMag = samples.reduce((sum, s) => sum + s.velMag, 0) / n;
+    
+    const radius = avgVelMag > 0.1 ? (avgVelMag * avgVelMag) / Math.max(avgAccelMag, 0.1) : 0;
+    
+    // Quality based on motion consistency and circularity
+    const motionConsistency = Math.min(1, avgAccelMag / 3);
+    const circularityScore = Math.min(1, correlation * 2);
+    const quality = (motionConsistency + circularityScore) / 2;
+    
+    return {
+      centerX: meanX,
+      centerY: meanY,
+      radius: Math.min(radius, 1.0), // Clamp to reasonable values
+      quality: quality
+    };
   }
-
-  _moveDot(){
-    const x=(this._lastXPix??this.cx), y=(this._lastYPix??this.cy);
-    const cssW=this.canvas.clientWidth, cssH=this.canvas.clientHeight;
-    const cssX=(x/this.dpr)-cssW/2, cssY=(y/this.dpr)-cssH/2;
-    this._uiX+=this.uiAlpha*(cssX-this._uiX);
-    this._uiY+=this.uiAlpha*(cssY-this._uiY);
-    this.dot.style.transform=`translate(calc(-50% + ${this._uiX}px), calc(-50% + ${this._uiY}px))`;
+  
+  _updateVisualization(sample) {
+    // Draw motion path
+    const x = this.centerX + (sample.smoothAccel.x * 40);
+    const y = this.centerY + (sample.smoothAccel.y * 40);
+    
+    this.ctx.strokeStyle = `hsl(${(this.circleProgress * 240)}, 70%, 60%)`;
+    this.ctx.globalAlpha = 0.8;
+    
+    if (!this.pathStarted) {
+      this.ctx.beginPath();
+      this.ctx.moveTo(x, y);
+      this.pathStarted = true;
+    } else {
+      this.ctx.lineTo(x, y);
+      this.ctx.stroke();
+    }
+    
+    // Update dot position
+    this.dot.style.transform = `translate(${x - this.centerX}px, ${y - this.centerY}px)`;
+    
+    // Show circle indicator if detecting
+    if (this.circleProgress > 0.1) {
+      this.indicator.style.display = 'block';
+    } else {
+      this.indicator.style.display = 'none';
+    }
   }
-
-  _hud(aBP,phiDot,yaw,vfrac){
-    const a=document.getElementById('aBP'); if(a) a.textContent=aBP.toFixed(2);
-    const w=document.getElementById('omegaPhi'); if(w) w.textContent=((phiDot/DEG)|0);
-    const y=document.getElementById('yaw'); if(y) y.textContent=(yaw|0);
-    const vf=document.getElementById('vfrac'); if(vf) vf.textContent=Math.round(vfrac*100)+'%';
+  
+  _updateProgress() {
+    const progressBar = document.getElementById('progressBar');
+    const progressText = document.getElementById('progressText');
+    const percent = Math.round(this.circleProgress * 100);
+    
+    if (progressBar) progressBar.style.width = `${percent}%`;
+    if (progressText) progressText.textContent = `Circular motion: ${percent}%`;
   }
-
-  _onDetected(){
-    document.body.style.background='linear-gradient(135deg,#4CAF50 0%,#45a049 100%)';
-    setTimeout(()=>{document.body.style.background='linear-gradient(135deg,#667eea 0%,#764ba2 100%)';},600);
-    const s=document.getElementById('status');
-    if(s){ s.textContent='🎉 Rapid wrist circle'; s.className='status detecting';
-      setTimeout(()=>{ s.textContent='Listening… one quick wrist circle'; s.className='status active'; },1200); }
-    const h=document.getElementById('history');
-    if(h){ const div=document.createElement('div'); div.className='detection-item';
-      div.textContent=new Date().toLocaleTimeString()+': Rapid circle detected'; h.appendChild(div); }
-    if('vibrate' in navigator) navigator.vibrate([140,80,140]);
+  
+  _updateHUD(centripetal, angularVel, quality, energy, radius) {
+    const elements = {
+      'centripetal': centripetal.toFixed(2) + ' m/s²',
+      'angularVel': angularVel.toFixed(0) + ' °/s',
+      'quality': Math.round(quality * 100) + '%',
+      'energy': energy.toFixed(2),
+      'radius': Math.round(radius * 100) + ' cm'
+    };
+    
+    Object.entries(elements).forEach(([id, text]) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = text;
+    });
+  }
+  
+  _onCircleDetected(duration, radius, quality) {
+    // Visual feedback
+    document.body.style.background = 'linear-gradient(135deg,#4CAF50 0%,#45a049 100%)';
+    setTimeout(() => {
+      document.body.style.background = 'linear-gradient(135deg,#667eea 0%,#764ba2 100%)';
+    }, 800);
+    
+    // Status update
+    const status = document.getElementById('status');
+    if (status) {
+      status.textContent = '🎉 Circular motion detected!';
+      status.className = 'status detecting';
+      setTimeout(() => {
+        status.textContent = 'Ready! Move your arm in circles';
+        status.className = 'status active';
+      }, 1500);
+    }
+    
+    // Add to history
+    const history = document.getElementById('history');
+    if (history) {
+      const div = document.createElement('div');
+      div.className = 'detection-item';
+      div.textContent = `${new Date().toLocaleTimeString()}: Circle (${duration.toFixed(1)}s, r=${Math.round(radius*100)}cm, q=${Math.round(quality*100)}%)`;
+      history.appendChild(div);
+      history.scrollTop = history.scrollHeight;
+    }
+    
+    // Haptic feedback
+    if ('vibrate' in navigator) {
+      navigator.vibrate([150, 100, 150]);
+    }
   }
 }
 
-/* ============== Wiring (no permission prompts) ============== */
-let det=null,isActive=false,probeTimer=null;
+// Global state
+let detector = null;
+let isActive = false;
 
-function startDetection(){
-  if(isActive) return;
-  det=new RapidCircleHardened(document.getElementById('pathCanvas'),document.getElementById('gyroDot'));
-  window.addEventListener('devicemotion', onMotion, {passive:true});
-  isActive=true;
-  const st=document.getElementById('status'); if(st){st.textContent='Calibrating… hold still 1s'; st.className='status';}
-  document.getElementById('startBtn').style.display='none';
-  document.getElementById('stopBtn').style.display='inline-block';
+function startDetection() {
+  if (isActive) return;
+  
+  const canvas = document.getElementById('pathCanvas');
+  const dot = document.getElementById('motionDot');
+  const indicator = document.getElementById('circleIndicator');
+  
+  detector = new CircularMotionDetector(canvas, dot, indicator);
+  
+  window.addEventListener('devicemotion', onMotionEvent, { passive: true });
+  isActive = true;
+  
+  const status = document.getElementById('status');
+  if (status) {
+    status.textContent = 'Calibrating... hold still';
+    status.className = 'status';
+  }
+  
+  document.getElementById('startBtn').style.display = 'none';
+  document.getElementById('stopBtn').style.display = 'inline-block';
+  
+  // Check for sensor availability
+  let hasData = false;
+  const checkSensors = () => { hasData = true; };
+  window.addEventListener('devicemotion', checkSensors, { passive: true });
+  
+  setTimeout(() => {
+    window.removeEventListener('devicemotion', checkSensors);
+    if (!hasData) {
+      document.getElementById('sensorNotice').style.display = 'block';
+    }
+  }, 2000);
+}
 
-  // probe: show inline tip if no events in 2s
-  let got=false; const probe=()=>{got=true;window.removeEventListener('devicemotion',probe);};
-  window.addEventListener('devicemotion',probe,{passive:true});
-  clearTimeout(probeTimer);
-  probeTimer=setTimeout(()=>{ if(!got) document.getElementById('sensorNotice').style.display='block'; },2000);
+function stopDetection() {
+  if (!isActive) return;
+  
+  window.removeEventListener('devicemotion', onMotionEvent);
+  isActive = false;
+  
+  const status = document.getElementById('status');
+  if (status) {
+    status.textContent = 'Detection stopped';
+    status.className = 'status';
+  }
+  
+  document.getElementById('startBtn').style.display = 'inline-block';
+  document.getElementById('stopBtn').style.display = 'none';
+  document.getElementById('circleIndicator').style.display = 'none';
 }
-function stopDetection(){
-  if(!isActive) return;
-  window.removeEventListener('devicemotion', onMotion);
-  isActive=false;
-  const st=document.getElementById('status');
-  if(st){st.textContent='Detection stopped'; st.className='status';}
-  document.getElementById('startBtn').style.display='inline-block';
-  document.getElementById('stopBtn').style.display='none';
+
+function onMotionEvent(event) {
+  if (detector) {
+    detector.addMotionSample(
+      event.acceleration,
+      event.accelerationIncludingGravity,
+      event.rotationRate,
+      event.timeStamp || performance.now()
+    );
+  }
 }
-function onMotion(e){
-  det.addSample(
-    e.acceleration || null,
-    e.accelerationIncludingGravity || null,
-    e.rotationRate || null
-  );
+
+function clearHistory() {
+  const history = document.getElementById('history');
+  if (history) history.innerHTML = '';
+  
+  const progressBar = document.getElementById('progressBar');
+  const progressText = document.getElementById('progressText');
+  if (progressBar) progressBar.style.width = '0%';
+  if (progressText) progressText.textContent = 'Circular motion: 0%';
+  
+  if (detector) detector._resetDetection();
 }
-function clearHistory(){
-  const h=document.getElementById('history'); if(h) h.innerHTML='';
-  document.getElementById('confidenceBar').style.width='0%';
-  document.getElementById('confidenceText').textContent='Revolution progress: 0%';
-  if(det) det._resetCanvas();
-}
+
+// Handle window resize
+window.addEventListener('resize', () => {
+  if (detector) {
+    detector._setupCanvas();
+  }
+});
 </script>
 </body>
 </html>
