@@ -103,22 +103,21 @@
   
         // -------- Tunables (made friendlier) --------
         // Detect "almost full" revolution
-        this.progressTarget   = TAU * 0.85;  // ~306° (more forgiving)
-        this.segMinDur        = 0.25;        // s (fastest allowed rev)
-        this.segMaxDur        = 10.0;        // s (slow elbow circles OK)
-        this.signCoherenceMin = 0.70;        // mostly one direction
-  
-        // Adaptive gating via centripetal relation r ≈ a/ω²
-        this.omegaMin         = 0.40;        // rad/s (~23°/s) allow slow turns
-        this.aNoiseFloor      = 0.10;        // m/s²: ignore near-zero magnitude
-        this.rMin             = 0.04;        // m (4 cm)
-        this.rMax             = 0.45;        // m (45 cm, elbow)
-        this.rWin             = 1.2;         // s window for radius stability
-        this.rCoVMax          = 0.45;        // robust CoV (MAD-based)
-  
-        // Anti "spin on table" (gyro yaw veto)
-        this.yawSpinVeto      = 100;         // deg/s about gravity
-        this.spinLinearThresh = 1.0;         // m/s²: if planar < this + high yaw => veto
+        // Detect slower, gentler circles
+        this.omegaMin         = 0.25;      // was 0.40 (rad/s)
+        this.aNoiseFloor      = 0.05;      // was 0.10 (m/s^2)
+        this.progressTarget   = TAU * 0.80; // was TAU * 0.85 (~288° target)
+        this.signCoherenceMin = 0.60;      // was 0.70
+        this.segMaxDur        = 12.0;      // was 10.0 (allow slower revs)
+
+        // Radius window/stability → converge faster, more tolerant
+        this.rWin    = 0.60;   // was 1.2 (seconds)
+        this.rCoVMax = 0.60;   // was 0.45
+
+        // Anti “spin on table” veto → less likely to kill gentle moves
+        this.yawSpinVeto      = 140;   // was 100 (deg/s)
+        this.spinLinearThresh = 0.80;  // was 1.0 (m/s^2)
+
   
         // Gravity LPF (no gyro needed to estimate g)
         this.gTau = 0.25;                    // s
@@ -262,10 +261,8 @@
         const spinVeto = Math.abs(w_par_gyro) > this.yawSpinVeto && aPlanar < this.spinLinearThresh;
   
         // ---- Gate for PROGRESS/DETECTION (adaptive; no hard accel floor) ----
-        const gate = !spinVeto &&
-                     omega >= this.omegaMin &&
-                     aPlanar >= this.aNoiseFloor &&
-                     radiusOk;
+        const gate = !spinVeto && omega >= this.omegaMin && radiusOk;
+
   
         // Debug line (why didn't it fire?)
         if (DEBUG && this.debugEl) {
