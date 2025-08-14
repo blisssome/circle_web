@@ -107,7 +107,7 @@ function mad(a,m=null){if(!a.length)return 0;if(m==null)m=median(a);const d=a.ma
 class VelocityTurningDetector{
   constructor(canvas,dot){
     /* --- friendly tunables (you can tweak these few) --- */
-    this.progressTarget = TAU*0.7;     // ~306° counts as a revolution
+    this.progressTarget = TAU*0.5;     // ~306° counts as a revolution
     this.segMinDur = 0.18;              // allow fast loops
     this.segMaxDur = 12.0;
     this.gapMsAllow = 350;
@@ -123,7 +123,7 @@ class VelocityTurningDetector{
     this.aFloor = 0.05;                 // m/s²
     this.vFloor = 0.05;                 // speed units
     this.omegaMin = 0.1;               // rad/s (~14°/s) to count as "turning"
-    this.omegaOff = 0.6;
+    this.omegaOff = 0.2;
 
     // consistency of turning direction (0.5=random, 1.0=single direction)
     this.cohTau = 1.0;                  // seconds
