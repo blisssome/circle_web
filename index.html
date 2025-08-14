@@ -187,78 +187,232 @@
     </div>
 
     <script>
-        class CircularMotionDetector {
+        class WristRevolutionDetector {
           constructor() {
-            this.samples = [];             // {timestamp, dt, x,y,z}
-            this.maxBufferMs = 4000;       // keep ~4 seconds of history
+            // Sample history
+            this.samples = [];               // {t, dt, wx, wy, wz, axg, ayg, azg, ax, ay, az, u, v, pMag, gMag, gyroMag}
+            this.maxBufferMs = 5000;         // keep last 5s
       
-            // Detection targets / gates (tune these if needed)
-            this.targetRevolutionDeg = 330;  // "almost full" turn
-            this.windowSec = 3.0;            // integrate over last N seconds
-            this.minDurationSec = 0.5;       // avoid hair-trigger bursts
+            // Main detection window & target
+            this.windowSec = 3.0;            // integrate ~last 3s
+            this.minDurationSec = 0.6;
             this.maxDurationSec = 4.0;
+            this.targetRevolutionRad = 2 * Math.PI * 0.92; // ~330° as "almost full"
       
-            this.noiseFloor = 1.5;           // deg/s: below this = 0
-            this.minAvgVel = 20;             // deg/s average activity gate
-            this.maxAvgVel = 900;            // ignore insane spikes
+            // Noise / gating
+            this.accNoise = 1.0;             // m/s^2: below = noise
+            this.minActiveFrac = 0.35;       // fraction of samples with |planar a| above accNoise
+            this.minAvgPlanar = 1.2;         // m/s^2 average planar accel in window
+            this.minVelDeg = 0;              // not used now, but kept for tweaks
       
-            this.axisCoherenceMin = 0.70;    // energy aligned with dominant axis
-            this.signCoherenceMin = 0.85;    // fraction of time turning same direction
+            // Gyro gate (ignore self-rotation)
+            this.gyroQuietThresh = 40;       // deg/s (per-sample)
+            this.gyroQuietFracMin = 0.80;    // fraction of window that must be "quiet" to consider detection
+            this.gyroAvgMax = 25;            // average deg/s must be small
       
-            this.rateLimitMs = 2000;
-            this.lastDetection = 0;
+            // Sign coherence (mostly one direction)
+            this.signCoherenceMin = 0.85;
       
-            // UI smoothing (dot)
+            // Gravity estimation (low-pass on aInclG)
+            this.gLP = null;
+            this.gLP_tau = 0.25;             // seconds; lower = faster gravity updates
+            this.gLP_gyroGate = 60;          // only update gravity when gyro < this (deg/s)
+      
+            // UI
             this.uiX = 0; this.uiY = 0;
-            this.uiAlpha = 0.12;
-            this.visualDeadzone = 1.0;
-            this.uiScale = 1.2;
+            this.uiAlpha = 0.15;
+            this.visualDead = 0.8;
+            this.uiScale = 18;               // pixels per (m/s^2) on-plane
+      
+            // Debounce
+            this.lastDetection = 0;
+            this.rateLimitMs = 2000;
           }
       
-          addReading(x, y, z) {
+          addSample(wx, wy, wz, acc, accG) {
             const now = Date.now();
             const prev = this.samples.length ? this.samples[this.samples.length - 1] : null;
-            const dt = prev ? Math.max(0.001, (now - prev.timestamp) / 1000) : 0.016;
+            const dt = prev ? Math.max(0.001, (now - prev.t) / 1000) : 0.016;
       
-            this.samples.push({ timestamp: now, dt, x, y, z });
-            // Trim old samples by time
-            const cutoff = now - this.maxBufferMs;
-            while (this.samples.length && this.samples[0].timestamp < cutoff) {
-              this.samples.shift();
+            // Pull raw acceleration
+            const hasAcc = acc && [acc.x, acc.y, acc.z].every(v => typeof v === 'number');
+            const hasAccG = accG && [accG.x, accG.y, accG.z].every(v => typeof v === 'number');
+      
+            let axg = 0, ayg = 0, azg = 0;
+            if (hasAccG) { axg = accG.x; ayg = accG.y; azg = accG.z; }
+      
+            // Gravity low-pass (only when gyro is calm to avoid polluting g with motion)
+            const gyroMag = Math.sqrt((wx||0)**2 + (wy||0)**2 + (wz||0)**2);
+            if (hasAccG) {
+              if (this.gLP == null) {
+                this.gLP = { x: axg, y: ayg, z: azg };
+              } else {
+                const alpha = Math.exp(-dt / this.gLP_tau);
+                if (gyroMag < this.gLP_gyroGate) {
+                  this.gLP.x = alpha * this.gLP.x + (1 - alpha) * axg;
+                  this.gLP.y = alpha * this.gLP.y + (1 - alpha) * ayg;
+                  this.gLP.z = alpha * this.gLP.z + (1 - alpha) * azg;
+                }
+              }
             }
       
-            this.updateUI({ x, y });
+            // Linear acceleration (m/s^2)
+            let ax = 0, ay = 0, az = 0;
+            if (hasAcc) {
+              ax = acc.x || 0; ay = acc.y || 0; az = acc.z || 0;
+            } else if (hasAccG && this.gLP) {
+              ax = axg - this.gLP.x;
+              ay = ayg - this.gLP.y;
+              az = azg - this.gLP.z;
+            }
       
-            // Try detection each tick
-            const result = this.detectFullRevolution();
-            const progressPct = Math.round(result.progress * 100);
+            // If we don't have gravity yet, push & bail (need a frame)
+            if (!this.gLP) {
+              this.samples.push({ t: now, dt, wx, wy, wz, axg, ayg, azg, ax, ay, az,
+                                  u:0, v:0, pMag:0, gMag:0, gyroMag });
+              this._trim();
+              return;
+            }
       
-            // Update the existing bar/text as "progress"
-            document.getElementById('confidenceBar').style.width = progressPct + '%';
-            document.getElementById('confidenceText').textContent = `Confidence: ${progressPct}%`;
+            // Build plane basis perpendicular to gravity
+            const g = this.gLP;
+            const gMag = Math.sqrt(g.x*g.x + g.y*g.y + g.z*g.z) || 1;
+            const gn = { x: g.x / gMag, y: g.y / gMag, z: g.z / gMag };
       
-            if (result.detected) {
+            // Choose a non-parallel reference to build basis
+            const ref = Math.abs(gn.z) < 0.9 ? {x:0, y:0, z:1} : {x:1, y:0, z:0};
+            const e1 = this._norm(this._cross(gn, ref)); // first axis in plane
+            const e2 = this._cross(gn, e1);              // second axis in plane (already unit)
+      
+            // Project linear acceleration into the plane
+            const dot_g = ax*gn.x + ay*gn.y + az*gn.z;
+            const px = ax - dot_g * gn.x;
+            const py = ay - dot_g * gn.y;
+            const pz = az - dot_g * gn.z;
+            const u = px*e1.x + py*e1.y + pz*e1.z;   // planar coords
+            const v = px*e2.x + py*e2.y + pz*e2.z;
+            const pMag = Math.sqrt(u*u + v*v);
+      
+            this.samples.push({ t: now, dt, wx, wy, wz, axg, ayg, azg, ax, ay, az,
+                                u, v, pMag, gMag, gyroMag });
+            this._trim();
+      
+            // UI (visualize planar accel vector so circles look like circles)
+            this._updateUI(u, v, wx, wy, wz, Math.sqrt(ax*ax+ay*ay+az*az));
+      
+            // Try detection on each tick
+            const { progress, detected } = this._detectRevolution();
+            const pct = Math.round(progress * 100);
+            document.getElementById('confidenceBar').style.width = pct + '%';
+            document.getElementById('confidenceText').textContent = `Confidence: ${pct}%`;
+      
+            if (detected) {
               const nowMs = Date.now();
               if (nowMs - this.lastDetection > this.rateLimitMs) {
-                this.onCircularMotionDetected(result.progress);
                 this.lastDetection = nowMs;
-                // After a fire, clear older samples so we don't double-trigger on the same spin
-                this._clearWindow();
+                this._onDetected();
+                this._resetWindow(); // avoid double-firing on same spin
               }
             }
           }
       
-          updateUI(reading) {
-            document.getElementById('gyroData').textContent =
-              `X: ${reading.x.toFixed(1)}°/s, Y: ${reading.y.toFixed(1)}°/s, Z: ${0}°/s`;
-            const magnitude = Math.sqrt(reading.x**2 + reading.y**2 + 0);
-            document.getElementById('magnitude').textContent = magnitude.toFixed(1);
+          // ---- Detection core: revolution from planar acceleration angle ----
+          _detectRevolution() {
+            const W = this._window(this.windowSec);
+            if (W.length < 12) return { progress: 0, detected: false };
       
-            // Calm velocity dot (UI only; still not a "path")
-            this.uiX += this.uiAlpha * (reading.x - this.uiX);
-            this.uiY += this.uiAlpha * (reading.y - this.uiY);
-            const visX = Math.abs(this.uiX) < this.visualDeadzone ? 0 : this.uiX;
-            const visY = Math.abs(this.uiY) < this.visualDeadzone ? 0 : this.uiY;
+            const duration = (W[W.length-1].t - W[0].t) / 1000;
+            if (duration < this.minDurationSec || duration > this.maxDurationSec) {
+              return { progress: 0, detected: false };
+            }
+      
+            const gyroQuietCount = W.filter(s => s.gyroMag < this.gyroQuietThresh).length;
+            const gyroQuietFrac = gyroQuietCount / W.length;
+            const gyroAvg = W.reduce((a,s)=>a+s.gyroMag, 0) / W.length;
+      
+            // Hard gate: mostly quiet gyro, low average rotation
+            if (gyroQuietFrac < this.gyroQuietFracMin || gyroAvg > this.gyroAvgMax) {
+              return { progress: 0, detected: false };
+            }
+      
+            // Only consider samples with enough planar accel
+            const active = W.filter(s => s.pMag >= this.accNoise);
+            const activeFrac = active.length / W.length;
+            if (activeFrac < this.minActiveFrac) {
+              return { progress: 0, detected: false };
+            }
+      
+            const avgPlanar = active.reduce((a,s)=>a+s.pMag,0) / active.length;
+            if (avgPlanar < this.minAvgPlanar) {
+              return { progress: 0, detected: false };
+            }
+      
+            // Track angle of planar vector and integrate signed change
+            let haveTheta = false, prevTheta = 0;
+            let signedSum = 0, posDur = 0, negDur = 0;
+      
+            for (const s of active) {
+              const theta = Math.atan2(s.v, s.u);
+              if (!haveTheta) {
+                haveTheta = true; prevTheta = theta;
+                continue;
+              }
+              let d = theta - prevTheta;
+              // unwrap to [-pi, pi]
+              if (d >  Math.PI) d -= 2*Math.PI;
+              if (d < -Math.PI) d += 2*Math.PI;
+      
+              signedSum += d;
+              if (d > 0) posDur += s.dt; else if (d < 0) negDur += s.dt;
+              prevTheta = theta;
+            }
+      
+            const progress = Math.min(1, Math.abs(signedSum) / this.targetRevolutionRad);
+            const totalTurn = posDur + negDur;
+            const signCoherence = totalTurn > 0 ? Math.max(posDur, negDur) / totalTurn : 0;
+      
+            const detected =
+              progress >= 1.0 &&
+              signCoherence >= this.signCoherenceMin;
+      
+            return { progress, detected };
+          }
+      
+          _onDetected() {
+            console.log('🎯 Full wrist revolution detected');
+            const status = document.getElementById('status');
+            status.textContent = '🎉 FULL REVOLUTION!';
+            status.className = 'status detecting';
+            if ('vibrate' in navigator) navigator.vibrate([200,100,200]);
+            setTimeout(() => {
+              status.textContent = 'Listening for circular motions...';
+              status.className = 'status active';
+            }, 2000);
+      
+            const historyItem = document.createElement('div');
+            historyItem.className = 'detection-item';
+            historyItem.textContent = `${new Date().toLocaleTimeString()}: Full revolution`;
+            document.getElementById('history').appendChild(historyItem);
+      
+            // Quick visual flash
+            document.body.style.background = 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)';
+            setTimeout(() => {
+              document.body.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+            }, 800);
+          }
+      
+          // ---- UI helpers ----
+          _updateUI(u, v, wx, wy, wz, aMag) {
+            // Numbers: keep showing gyro (deg/s)
+            document.getElementById('gyroData').textContent =
+              `X: ${wx.toFixed(1)}°/s, Y: ${wy.toFixed(1)}°/s, Z: ${wz.toFixed(1)}°/s`;
+            document.getElementById('magnitude').textContent = aMag.toFixed(2); // total linear accel
+      
+            // Dot shows planar acceleration (so wrist circles draw circles)
+            this.uiX += this.uiAlpha * (u - this.uiX);
+            this.uiY += this.uiAlpha * (v - this.uiY);
+            const visX = Math.abs(this.uiX) < this.visualDead ? 0 : this.uiX;
+            const visY = Math.abs(this.uiY) < this.visualDead ? 0 : this.uiY;
       
             const dot = document.getElementById('gyroDot');
             const maxOffset = 90;
@@ -267,134 +421,44 @@
             dot.style.transform = `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px))`;
           }
       
-          // ---------- Core detector: "Full revolution" ----------
-          detectFullRevolution() {
-            const window = this._getWindow(this.windowSec);
-            if (window.length < 10) return { detected: false, progress: 0 };
-      
-            const duration = (window[window.length - 1].timestamp - window[0].timestamp) / 1000;
-            if (duration < this.minDurationSec || duration > this.maxDurationSec) {
-              return { detected: false, progress: 0 };
-            }
-      
-            // Apply deadzone
-            const W = window.map(s => ({
-              dt: s.dt,
-              x: this._dz(s.x),
-              y: this._dz(s.y),
-              z: this._dz(s.z)
-            }));
-      
-            // Activity gate
-            const avgVel = this._mean(W.map(v => Math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z)));
-            if (avgVel < this.minAvgVel || avgVel > this.maxAvgVel) return { detected: false, progress: 0 };
-      
-            // Estimate dominant axis of rotation (weighted by |ω|)
-            const axis = this._dominantAxis(W);
-            if (!axis) return { detected: false, progress: 0 };
-      
-            // Project onto axis, integrate signed angle, and measure coherences
-            const proj = [];
-            let sumPar = 0;          // ∑ ω_parallel * dt  (degrees)
-            let energyPar = 0;       // ∑ ω_parallel^2
-            let energyTotal = 0;     // ∑ ||ω||^2
-      
-            for (const s of W) {
-              const par = s.x * axis[0] + s.y * axis[1] + s.z * axis[2];
-              proj.push({ par, dt: s.dt });
-              sumPar += par * s.dt;
-              energyPar += par * par;
-              energyTotal += s.x*s.x + s.y*s.y + s.z*s.z;
-            }
-      
-            // Axis coherence: how much energy lies along the dominant axis
-            const axisCoherence = energyTotal > 0 ? (energyPar / energyTotal) : 0;
-      
-            // Direction (sign) coherence: mostly same sign as the dominant sign?
-            const domSign = sumPar >= 0 ? 1 : -1;
-            let same = 0, total = 0;
-            for (const p of proj) {
-              if (Math.abs(p.par) < this.noiseFloor) continue;
-              total += p.dt;
-              if (p.par * domSign > 0) same += p.dt;
-            }
-            const signCoherence = total > 0 ? same / total : 0;
-      
-            // Progress toward full revolution
-            const progress = Math.min(1, Math.abs(sumPar) / this.targetRevolutionDeg);
-      
-            // Decision
-            const detected =
-              progress >= 1.0 &&
-              axisCoherence >= this.axisCoherenceMin &&
-              signCoherence >= this.signCoherenceMin;
-      
-            return { detected, progress };
+          // ---- Utility ----
+          _trim() {
+            const cutoff = Date.now() - this.maxBufferMs;
+            while (this.samples.length && this.samples[0].t < cutoff) this.samples.shift();
           }
       
-          onCircularMotionDetected(progress) {
-            console.log(`🔄 Full revolution detected! Progress: ${(progress*100).toFixed(0)}%`);
-            document.body.style.background = 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)';
-            setTimeout(() => { document.body.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'; }, 1000);
-      
-            if ('vibrate' in navigator) navigator.vibrate([200, 100, 200]);
-      
-            const historyItem = document.createElement('div');
-            historyItem.className = 'detection-item';
-            historyItem.textContent = `${new Date().toLocaleTimeString()}: Full revolution`;
-            document.getElementById('history').appendChild(historyItem);
-      
-            const status = document.getElementById('status');
-            status.textContent = `🎉 FULL REVOLUTION!`;
-            status.className = 'status detecting';
-            setTimeout(() => { status.textContent = 'Listening for circular motions...'; status.className = 'status active'; }, 2000);
-          }
-      
-          // ---------- Helpers ----------
-          _getWindow(sec) {
-            const now = Date.now();
-            const start = now - sec * 1000;
-            // Collect only recent samples (preserve dt)
+          _window(sec) {
+            const start = Date.now() - sec * 1000;
             const out = [];
             for (let i = this.samples.length - 1; i >= 0; i--) {
               const s = this.samples[i];
-              if (s.timestamp < start) break;
+              if (s.t < start) break;
               out.push(s);
             }
             return out.reverse();
           }
       
-          _clearWindow() {
-            const now = Date.now();
-            const keepStart = now - 500; // keep just a very short tail
-            this.samples = this.samples.filter(s => s.timestamp >= keepStart);
+          _resetWindow() {
+            const keepStart = Date.now() - 300; // keep just a short tail
+            this.samples = this.samples.filter(s => s.t >= keepStart);
           }
       
-          _dz(v) { return Math.abs(v) < this.noiseFloor ? 0 : v; }
-          _mean(a) { return a.length ? a.reduce((x,y)=>x+y,0)/a.length : 0; }
+          _cross(a, b) {
+            return { x: a.y*b.z - a.z*b.y,
+                     y: a.z*b.x - a.x*b.z,
+                     z: a.x*b.y - a.y*b.x };
+          }
       
-          _dominantAxis(W) {
-            // Weighted by |ω| to prefer stronger samples
-            let sx = 0, sy = 0, sz = 0, wsum = 0;
-            for (const s of W) {
-              const mag = Math.sqrt(s.x*s.x + s.y*s.y + s.z*s.z);
-              if (mag === 0) continue;
-              sx += (s.x / mag) * mag;
-              sy += (s.y / mag) * mag;
-              sz += (s.z / mag) * mag;
-              wsum += mag;
-            }
-            if (wsum === 0) return null;
-            const n = Math.sqrt(sx*sx + sy*sy + sz*sz);
-            if (n < 1e-6) return null;
-            return [sx/n, sy/n, sz/n]; // unit vector
+          _norm(v) {
+            const n = Math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z) || 1;
+            return { x: v.x / n, y: v.y / n, z: v.z / n };
           }
         }
       
-        const detector = new CircularMotionDetector();
+        const detector = new WristRevolutionDetector();
         let isDetectionActive = false;
       
-        // iOS permission for motion sensors (unchanged)
+        // Permission flow for iOS
         function startDetection() {
           const needsPermission =
             typeof DeviceMotionEvent !== 'undefined' &&
@@ -402,11 +466,11 @@
       
           if (needsPermission) {
             DeviceMotionEvent.requestPermission()
-              .then((state) => {
+              .then(state => {
                 if (state === 'granted') startGyroscope();
                 else alert('Motion permission denied. Please allow in browser settings.');
               })
-              .catch((err) => { console.error(err); alert('Permission request failed.'); });
+              .catch(err => { console.error(err); alert('Permission request failed.'); });
           } else {
             startGyroscope();
           }
@@ -414,7 +478,7 @@
       
         function startGyroscope() {
           if (isDetectionActive) return;
-          window.addEventListener('devicemotion', handleMotion);
+          window.addEventListener('devicemotion', handleMotion, { passive: true });
           isDetectionActive = true;
       
           document.getElementById('status').textContent = 'Listening for circular motions...';
@@ -422,7 +486,7 @@
           document.getElementById('startBtn').style.display = 'none';
           document.getElementById('stopBtn').style.display = 'inline-block';
       
-          console.log('🚀 Full-revolution detection started');
+          console.log('🚀 Wrist-revolution detection started');
         }
       
         function stopDetection() {
@@ -438,17 +502,19 @@
           console.log('⏹️ Detection stopped');
         }
       
-        function handleMotion(event) {
+        function handleMotion(e) {
           if (!isDetectionActive) return;
-          const rr = event.rotationRate;
-          if (rr) {
-            // Keep degrees/sec; map beta->X, gamma->Y, alpha->Z
-            detector.addReading(
-              rr.beta  || 0,  // X
-              rr.gamma || 0,  // Y
-              rr.alpha || 0   // Z
-            );
-          }
+          const rr = e.rotationRate || {};
+          const acc = e.acceleration || null;
+          const accG = e.accelerationIncludingGravity || null;
+      
+          detector.addSample(
+            rr.beta  || 0,   // X deg/s
+            rr.gamma || 0,   // Y deg/s
+            rr.alpha || 0,   // Z deg/s
+            acc,
+            accG
+          );
         }
       
         function clearHistory() {
@@ -458,9 +524,11 @@
         }
       
         window.addEventListener('load', () => {
-          console.log('📱 Spin your wrist (keep turning in the SAME direction). Progress climbs to ~100%, then triggers.');
+          console.log('📱 Rotate your HAND in a circle while keeping the phone’s orientation fairly steady.');
+          console.log('🧪 Pure flips/rolls won’t count (gyro gate blocks them). The green dot should draw a circle.');
         });
       </script>
+      
       
       
       
