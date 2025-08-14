@@ -433,13 +433,67 @@
     // ---------- Wiring ----------
     let detector=null, isActive=false;
 
-    function startDetection(){
-      if (typeof DeviceMotionEvent!=='undefined' && typeof DeviceMotionEvent.requestPermission==='function') {
-        DeviceMotionEvent.requestPermission()
-          .then(state=>{ if(state==='granted') start(); else alert('Motion permission denied.'); })
-          .catch(e=>{ console.error(e); alert('Permission request failed.'); });
-      } else { start(); }
+    async function startDetection(){
+    try {
+    const isiOS = typeof DeviceMotionEvent !== 'undefined' &&
+                    typeof DeviceMotionEvent.requestPermission === 'function';
+
+    if (isiOS) {
+        // Ask for DeviceMotion (required for 'devicemotion')
+        let dm = 'denied';
+        try { dm = await DeviceMotionEvent.requestPermission(); } catch(e) {}
+        // Also try DeviceOrientation (some iOS builds couple the two)
+        try {
+        if (typeof DeviceOrientationEvent !== 'undefined' &&
+            typeof DeviceOrientationEvent.requestPermission === 'function') {
+            await DeviceOrientationEvent.requestPermission().catch(()=>{});
+        }
+        } catch(e) {}
+
+        if (dm !== 'granted') {
+        alert(
+            'iOS blocked motion sensors.\n\nTurn it on and reload:\n' +
+            'Safari → aA → Website Settings → Motion & Orientation Access → ON'
+        );
+        return;
+        }
     }
+
+    // Start your detector (unchanged)
+    start(); // this is your existing start() that adds the devicemotion listener
+
+    // Sanity probe: did we actually get an event?
+    let got = false;
+    const probe = () => { got = true; window.removeEventListener('devicemotion', probe); };
+    window.addEventListener('devicemotion', probe, { passive: true });
+
+    setTimeout(() => {
+        if (!got) {
+        alert(
+            'No motion events received.\n\nQuick fixes:\n' +
+            '• iOS Safari: aA → Website Settings → Motion & Orientation Access → ON → Reload\n' +
+            '• Android Chrome: Site settings → Motion sensors → Allow\n' +
+            '• Ensure the page is HTTPS and not inside an iframe.'
+        );
+        }
+    }, 2000);
+
+    // Optional UI tweaks you already had:
+    const st = document.getElementById('status');
+    if (st) { st.textContent = 'Calibrating… hold still for 1s'; st.className = 'status'; }
+    document.getElementById('startBtn').style.display = 'none';
+    document.getElementById('stopBtn').style.display = 'inline-block';
+
+    } catch (err) {
+    console.error(err);
+    alert(
+        'Permission request failed.\n\nFix:\n' +
+        '• iOS: Safari → aA → Website Settings → Motion & Orientation Access → ON → Reload\n' +
+        '• Android Chrome: Site settings → Motion sensors → Allow\n' +
+        '• Use HTTPS; avoid running inside an iframe.'
+    );
+    }
+}
     function start(){
       if (isActive) return;
       detector = new CalibratedWristDetector(
