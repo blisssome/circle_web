@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Enhanced Circular Motion Detector</title>
+<title>Circle vs Shake Detector</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{
@@ -19,7 +19,8 @@
   h1{font-size:22px;font-weight:700;margin-bottom:12px}
   .status{padding:12px;border-radius:10px;margin:12px 0;font-weight:600;border:1px solid rgba(255,255,255,.35)}
   .status.active{background:rgba(76,175,80,.18);border-color:rgba(76,175,80,.55)}
-  .status.detecting{background:rgba(255,193,7,.2);border-color:rgba(255,193,7,.6);animation:pulse 1.5s infinite}
+  .status.circle{background:rgba(33,150,243,.2);border-color:rgba(33,150,243,.6);animation:pulse 1.5s infinite}
+  .status.shake{background:rgba(255,87,34,.2);border-color:rgba(255,87,34,.6);animation:pulse 1.5s infinite}
   @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.02)}}
   .visual{
     position:relative;width:280px;height:280px;margin:14px auto 10px;border-radius:50%;
@@ -32,13 +33,20 @@
     background:#4CAF50;top:50%;left:50%;transform:translate(-50%,-50%);
     box-shadow:0 0 0 2px rgba(0,0,0,.12);transition:transform .08s ease
   }
-  .progress-bar{width:100%;height:18px;background:rgba(255,255,255,.2);border-radius:10px;overflow:hidden;margin:8px 0}
-  .progress-fill{height:100%;width:0%;background:linear-gradient(90deg,#4CAF50,#FFC107,#FF5722);border-radius:10px;transition:width .2s ease}
+  .dual-progress{display:flex;gap:8px;margin:8px 0}
+  .progress-container{flex:1}
+  .progress-label{font-size:12px;margin-bottom:4px;opacity:0.8}
+  .progress-bar{width:100%;height:16px;background:rgba(255,255,255,.2);border-radius:8px;overflow:hidden}
+  .progress-fill{height:100%;width:0%;border-radius:8px;transition:width .2s ease}
+  .circle-fill{background:linear-gradient(90deg,#2196F3,#03DAC6)}
+  .shake-fill{background:linear-gradient(90deg,#FF5722,#FF9800)}
   .data-display{background:rgba(0,0,0,.22);border-radius:10px;padding:12px;margin-top:12px;
-    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;font-size:12px;text-align:left}
-  .data-row{display:flex;justify-content:space-between;margin:4px 0}
-  .detection-history{max-height:160px;overflow-y:auto;background:rgba(0,0,0,.22);border-radius:10px;padding:10px;margin-top:12px;text-align:left}
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;font-size:11px;text-align:left}
+  .data-row{display:flex;justify-content:space-between;margin:3px 0}
+  .detection-history{max-height:140px;overflow-y:auto;background:rgba(0,0,0,.22);border-radius:10px;padding:10px;margin-top:12px;text-align:left}
   .detection-item{padding:4px 0;border-bottom:1px solid rgba(255,255,255,.12);font-size:13px}
+  .detection-item.circle{color:#64B5F6}
+  .detection-item.shake{color:#FF8A65}
   button{
     background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.34);color:#fff;
     padding:10px 18px;border-radius:22px;cursor:pointer;font-size:15px;margin:8px 6px;transition:all .15s ease
@@ -46,35 +54,29 @@
   button:hover{background:rgba(255,255,255,.28);transform:translateY(-1px)}
   button:active{transform:translateY(0)}
   #sensorNotice{display:none;margin-top:8px;padding:10px;border-radius:10px;background:rgba(255,107,107,.18);border:1px solid rgba(255,107,107,.5);font-size:13px;text-align:left}
-  .circle-indicator{
-    position:absolute;
-    top:10px;
-    left:10px;
-    width:20px;
-    height:20px;
-    border:2px solid rgba(255,255,255,.4);
-    border-radius:50%;
-    border-top:2px solid #4CAF50;
-    display:none;
-    animation:spin 1s linear infinite;
-  }
-  @keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
   <div class="container">
-    <h1>🔄 Enhanced Circular Motion Detector</h1>
+    <h1>🔄 Circle vs Shake Detector</h1>
 
-    <div id="status" class="status">Hold phone steady, move your arm in circles</div>
+    <div id="status" class="status">Move your arm - circles or shakes will be detected</div>
 
     <div class="visual">
       <canvas id="pathCanvas"></canvas>
       <div id="motionDot"></div>
-      <div id="circleIndicator" class="circle-indicator"></div>
     </div>
 
-    <div class="progress-bar"><div id="progressBar" class="progress-fill"></div></div>
-    <div id="progressText">Circular motion: 0%</div>
+    <div class="dual-progress">
+      <div class="progress-container">
+        <div class="progress-label">Circle Progress</div>
+        <div class="progress-bar"><div id="circleBar" class="progress-fill circle-fill"></div></div>
+      </div>
+      <div class="progress-container">
+        <div class="progress-label">Shake Intensity</div>
+        <div class="progress-bar"><div id="shakeBar" class="progress-fill shake-fill"></div></div>
+      </div>
+    </div>
 
     <div>
       <button id="startBtn" onclick="startDetection()">Start Detection</button>
@@ -83,10 +85,11 @@
     </div>
 
     <div class="data-display">
-      <div class="data-row"><span>Centripetal Accel:</span> <span id="centripetal">0.00 m/s²</span></div>
-      <div class="data-row"><span>Angular Velocity:</span> <span id="angularVel">0 °/s</span></div>
-      <div class="data-row"><span>Circle Quality:</span> <span id="quality">0%</span></div>
-      <div class="data-row"><span>Motion Energy:</span> <span id="energy">0.00</span></div>
+      <div class="data-row"><span>Motion Type:</span> <span id="motionType">None</span></div>
+      <div class="data-row"><span>Circular Score:</span> <span id="circleScore">0%</span></div>
+      <div class="data-row"><span>Shake Score:</span> <span id="shakeScore">0%</span></div>
+      <div class="data-row"><span>Angular Vel:</span> <span id="angularVel">0 °/s</span></div>
+      <div class="data-row"><span>Frequency:</span> <span id="frequency">0 Hz</span></div>
       <div class="data-row"><span>Radius Est:</span> <span id="radius">0 cm</span></div>
     </div>
 
@@ -106,20 +109,11 @@
 const TAU = Math.PI * 2;
 const DEG = 180 / Math.PI;
 
-class CircularMotionDetector {
-  constructor(canvas, dot, indicator) {
+class MotionDetector {
+  constructor(canvas, dot) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.dot = dot;
-    this.indicator = indicator;
-    
-    // Detection parameters - made much stricter
-    this.minCircleTime = 0.8;      // Minimum time for one circle (seconds) - slower
-    this.maxCircleTime = 4.0;      // Maximum time for one circle - allow slower circles  
-    this.minRadius = 0.12;         // Minimum radius in meters - larger minimum
-    this.maxRadius = 0.6;          // Maximum radius in meters
-    this.qualityThreshold = 0.75;  // Higher minimum circle quality (0-1)
-    this.minCentripetalAccel = 1.5; // Higher minimum centripetal acceleration
     
     // State variables
     this.isCalibrating = true;
@@ -127,22 +121,34 @@ class CircularMotionDetector {
     this.gravity = null;
     this.lastTime = 0;
     this.motionHistory = [];
-    this.maxHistoryLength = 150; // ~3 seconds at 50Hz
+    this.maxHistoryLength = 100; // 2 seconds at 50Hz
     
-    // Circular motion tracking
+    // Circle detection
     this.circleProgress = 0;
-    this.currentAngle = 0;
-    this.lastAngle = null;
     this.totalRotation = 0;
     this.circleStartTime = 0;
-    this.centerX = 0;
-    this.centerY = 0;
-    this.estimatedRadius = 0;
+    this.lastAngle = null;
+    this.circleCenter = { x: 0, y: 0 };
+    this.circleRadius = 0;
+    this.circleQuality = 0;
+    
+    // Shake detection  
+    this.shakeIntensity = 0;
+    this.shakeFrequency = 0;
+    this.rapidChanges = 0;
+    this.shakeStartTime = 0;
     
     // Smoothing
     this.smoothedAccel = { x: 0, y: 0 };
-    this.smoothedVel = { x: 0, y: 0 };
-    this.smoothingFactor = 0.1;
+    this.prevAccel = { x: 0, y: 0 };
+    
+    // Thresholds
+    this.circleMinRadius = 0.08;
+    this.circleMaxRadius = 0.7;
+    this.circleMinTime = 0.6;
+    this.circleMaxTime = 4.0;
+    this.shakeThreshold = 2.0;
+    this.shakeMinFreq = 2.0; // Hz
     
     this._setupCanvas();
     this._resetDetection();
@@ -160,7 +166,7 @@ class CircularMotionDetector {
     this.canvasHeight = rect.height;
     this.centerX = this.canvasWidth / 2;
     this.centerY = this.canvasHeight / 2;
-    this.maxRadius = Math.min(this.canvasWidth, this.canvasHeight) * 0.4;
+    this.visualRadius = Math.min(this.canvasWidth, this.canvasHeight) * 0.35;
     
     this.ctx.lineWidth = 2;
     this.ctx.lineCap = 'round';
@@ -171,44 +177,45 @@ class CircularMotionDetector {
     this.ctx.clearRect(0, 0, this.canvasWidth, this.canvasHeight);
     
     // Draw reference circle
-    this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
     this.ctx.beginPath();
-    this.ctx.arc(this.centerX, this.centerY, this.maxRadius * 0.8, 0, TAU);
+    this.ctx.arc(this.centerX, this.centerY, this.visualRadius, 0, TAU);
     this.ctx.stroke();
     
-    // Reset path
     this.pathStarted = false;
   }
   
   _resetDetection() {
+    // Circle reset
     this.circleProgress = 0;
     this.totalRotation = 0;
     this.lastAngle = null;
     this.circleStartTime = 0;
+    this.circleQuality = 0;
+    
+    // Shake reset  
+    this.shakeIntensity = 0;
+    this.rapidChanges = 0;
+    this.shakeStartTime = 0;
+    
     this.motionHistory = [];
-    this.estimatedRadius = 0;
-    this._updateProgress();
+    this._updateUI();
     this._clearCanvas();
   }
   
   addMotionSample(acceleration, accelerationGravity, rotationRate, timestamp) {
     const now = timestamp || performance.now();
-    const dt = this.lastTime ? (now - this.lastTime) / 1000 : 1/60;
+    const dt = this.lastTime ? Math.max(0.001, (now - this.lastTime) / 1000) : 1/60;
     this.lastTime = now;
     
     // Establish gravity vector
     if (!this.gravity && accelerationGravity) {
-      this.gravity = {
-        x: accelerationGravity.x,
-        y: accelerationGravity.y,
-        z: accelerationGravity.z
-      };
+      this.gravity = { x: accelerationGravity.x, y: accelerationGravity.y, z: accelerationGravity.z };
       return;
     }
-    
     if (!this.gravity) return;
     
-    // Update gravity estimate with low-pass filter
+    // Update gravity estimate
     if (accelerationGravity) {
       const alpha = 0.02;
       this.gravity.x = (1 - alpha) * this.gravity.x + alpha * accelerationGravity.x;
@@ -216,7 +223,7 @@ class CircularMotionDetector {
       this.gravity.z = (1 - alpha) * this.gravity.z + alpha * accelerationGravity.z;
     }
     
-    // Calculate linear acceleration (remove gravity)
+    // Calculate linear acceleration
     let linearAccel = { x: 0, y: 0, z: 0 };
     if (acceleration) {
       linearAccel = acceleration;
@@ -228,380 +235,256 @@ class CircularMotionDetector {
       };
     }
     
-    // Smooth the acceleration
-    this.smoothedAccel.x = (1 - this.smoothingFactor) * this.smoothedAccel.x + this.smoothingFactor * linearAccel.x;
-    this.smoothedAccel.y = (1 - this.smoothingFactor) * this.smoothedAccel.y + this.smoothingFactor * linearAccel.y;
+    // Smooth acceleration
+    const smoothing = 0.15;
+    this.smoothedAccel.x = (1 - smoothing) * this.smoothedAccel.x + smoothing * linearAccel.x;
+    this.smoothedAccel.y = (1 - smoothing) * this.smoothedAccel.y + smoothing * linearAccel.y;
     
-    // Estimate velocity by integration (with decay to prevent drift)
-    const velocityDecay = 0.95;
-    this.smoothedVel.x = this.smoothedVel.x * velocityDecay + this.smoothedAccel.x * dt;
-    this.smoothedVel.y = this.smoothedVel.y * velocityDecay + this.smoothedAccel.y * dt;
+    const accelMag = Math.sqrt(this.smoothedAccel.x**2 + this.smoothedAccel.y**2);
     
-    // Calculate motion metrics
-    const accelMagnitude = Math.sqrt(linearAccel.x**2 + linearAccel.y**2 + linearAccel.z**2);
-    const planarAccelMag = Math.sqrt(this.smoothedAccel.x**2 + this.smoothedAccel.y**2);
-    const velMagnitude = Math.sqrt(this.smoothedVel.x**2 + this.smoothedVel.y**2);
-    
-    // Store motion history
-    const motionSample = {
+    // Store motion sample
+    const sample = {
       time: now,
       accel: { x: linearAccel.x, y: linearAccel.y },
       smoothAccel: { x: this.smoothedAccel.x, y: this.smoothedAccel.y },
-      velocity: { x: this.smoothedVel.x, y: this.smoothedVel.y },
-      accelMag: planarAccelMag,
-      velMag: velMagnitude
+      accelMag: accelMag,
+      dt: dt
     };
     
-    this.motionHistory.push(motionSample);
+    this.motionHistory.push(sample);
     if (this.motionHistory.length > this.maxHistoryLength) {
       this.motionHistory.shift();
     }
     
-    // Calibration phase
+    // Calibration
     if (this.isCalibrating) {
-      if (this.calibrationStart === 0) {
-        this.calibrationStart = now;
-      }
-      
-      if (now - this.calibrationStart > 1000) { // 1 second calibration
+      if (this.calibrationStart === 0) this.calibrationStart = now;
+      if (now - this.calibrationStart > 800) {
         this.isCalibrating = false;
         const status = document.getElementById('status');
         if (status) {
-          status.textContent = 'Ready! Move your arm in circles';
+          status.textContent = 'Ready! Make circles or shakes';
           status.className = 'status active';
         }
       }
-      this._updateHUD(planarAccelMag, 0, 0, 0, 0);
       return;
     }
     
-    // Detect circular motion
-    this._detectCircularMotion(motionSample, dt);
+    // Run both detectors simultaneously
+    this._detectCircles(sample);
+    this._detectShakes(sample);
     
     // Update visualization
-    this._updateVisualization(motionSample);
+    this._updateVisualization(sample);
+    this._updateUI();
+    
+    this.prevAccel = { x: linearAccel.x, y: linearAccel.y };
   }
   
-  _detectCircularMotion(sample, dt) {
-    if (this.motionHistory.length < 30) return; // Need more samples for reliable detection
+  _detectCircles(sample) {
+    if (this.motionHistory.length < 20) return;
     
-    // Use longer window for better circle detection
-    const windowSize = Math.min(60, this.motionHistory.length); // ~1.2 seconds at 50Hz
-    const recent = this.motionHistory.slice(-windowSize);
+    // Get recent motion for analysis
+    const recent = this.motionHistory.slice(-40); // ~0.8 seconds
     
-    // Perform comprehensive circular motion analysis
-    const circleAnalysis = this._analyzeCircularMotion(recent);
+    // Find motion center using weighted average
+    let weightedX = 0, weightedY = 0, totalWeight = 0;
+    recent.forEach(s => {
+      const weight = s.accelMag + 0.1; // Avoid zero weights
+      weightedX += s.smoothAccel.x * weight;
+      weightedY += s.smoothAccel.y * weight;
+      totalWeight += weight;
+    });
     
-    if (!circleAnalysis.isCircular) {
-      // Reset if not detecting circular motion
-      if (this.circleStartTime > 0 && sample.time - this.circleStartTime > 1000) {
-        this._resetDetection();
-      }
-      this._updateHUD(0, 0, 0, sample.accelMag, 0);
-      return;
+    if (totalWeight > 0) {
+      this.circleCenter.x = weightedX / totalWeight;
+      this.circleCenter.y = weightedY / totalWeight;
     }
     
-    // Track angular position more carefully
-    const angle = Math.atan2(sample.smoothAccel.y - circleAnalysis.centerY, 
-                             sample.smoothAccel.x - circleAnalysis.centerX);
+    // Calculate radius and circular quality
+    const distances = recent.map(s => Math.sqrt(
+      (s.smoothAccel.x - this.circleCenter.x)**2 + 
+      (s.smoothAccel.y - this.circleCenter.y)**2
+    ));
     
-    let angularVelocity = 0;
-    if (this.lastAngle !== null) {
-      let deltaAngle = angle - this.lastAngle;
+    if (distances.length > 0) {
+      this.circleRadius = distances.reduce((a, b) => a + b) / distances.length;
       
-      // Handle angle wrapping
-      if (deltaAngle > Math.PI) deltaAngle -= TAU;
-      if (deltaAngle < -Math.PI) deltaAngle += TAU;
+      // Calculate radius consistency (lower variance = more circular)
+      const avgDist = this.circleRadius;
+      const variance = distances.reduce((sum, d) => sum + (d - avgDist)**2, 0) / distances.length;
+      const consistency = avgDist > 0.05 ? Math.max(0, 1 - Math.sqrt(variance) / avgDist) : 0;
       
-      angularVelocity = deltaAngle / dt;
+      // Check for continuous rotation
+      const rotationScore = this._checkRotation(recent);
       
-      // Only accumulate if we have consistent circular motion
-      if (circleAnalysis.quality > 0.7 && 
-          Math.abs(angularVelocity) > 0.8 && 
-          Math.abs(angularVelocity) < 8.0 && // Reasonable angular velocity range
-          circleAnalysis.consistency > 0.6) {
+      // Combine scores for circle quality
+      this.circleQuality = (consistency * 0.6 + rotationScore * 0.4);
+    }
+    
+    // Track angular position for rotation measurement
+    if (this.circleRadius > this.circleMinRadius) {
+      const dx = sample.smoothAccel.x - this.circleCenter.x;
+      const dy = sample.smoothAccel.y - this.circleCenter.y;
+      const angle = Math.atan2(dy, dx);
+      
+      if (this.lastAngle !== null) {
+        let deltaAngle = angle - this.lastAngle;
+        if (deltaAngle > Math.PI) deltaAngle -= TAU;
+        if (deltaAngle < -Math.PI) deltaAngle += TAU;
         
-        // Start new circle if not already tracking
-        if (this.circleStartTime === 0) {
-          this.circleStartTime = sample.time;
-          this.totalRotation = 0;
+        // Start tracking if quality is good
+        if (this.circleQuality > 0.4 && Math.abs(deltaAngle) > 0.02) {
+          if (this.circleStartTime === 0) {
+            this.circleStartTime = sample.time;
+            this.totalRotation = 0;
+          }
+          this.totalRotation += Math.abs(deltaAngle);
         }
-        
-        // Accumulate rotation in consistent direction
-        this.totalRotation += Math.abs(deltaAngle);
       }
+      this.lastAngle = angle;
     }
     
-    this.lastAngle = angle;
-    this.estimatedRadius = circleAnalysis.radius;
-    
-    // Calculate progress
+    // Update progress
     this.circleProgress = Math.min(1, this.totalRotation / TAU);
     
-    // Check for complete circle with strict validation
-    if (this.circleProgress >= 0.9 && this.circleStartTime > 0) {
-      const circleTime = (sample.time - this.circleStartTime) / 1000;
+    // Check for complete circle
+    if (this.circleProgress > 0.85 && this.circleStartTime > 0) {
+      const duration = (sample.time - this.circleStartTime) / 1000;
       
-      if (this._validateCompleteCircle(circleTime, circleAnalysis)) {
-        this._onCircleDetected(circleTime, circleAnalysis.radius, circleAnalysis.quality);
-        this._resetDetection();
+      if (duration >= this.circleMinTime && 
+          duration <= this.circleMaxTime &&
+          this.circleQuality > 0.5 &&
+          this.circleRadius >= this.circleMinRadius &&
+          this.circleRadius <= this.circleMaxRadius) {
+        
+        this._onCircleDetected(duration, this.circleRadius, this.circleQuality);
       }
     }
     
-    // Update UI
-    const centripetalAccel = circleAnalysis.radius > 0 ? 
-      (sample.velMag * sample.velMag) / circleAnalysis.radius : 0;
-    this._updateHUD(centripetalAccel, angularVelocity * DEG, circleAnalysis.quality, 
-                   sample.accelMag, circleAnalysis.radius);
-    this._updateProgress();
-  }
-  
-  _analyzeCircularMotion(samples) {
-    if (samples.length < 30) {
-      return { isCircular: false, quality: 0, radius: 0, centerX: 0, centerY: 0, consistency: 0 };
+    // Reset if motion becomes non-circular or stops
+    if (sample.accelMag < 0.3 || this.circleQuality < 0.2) {
+      if (this.circleStartTime > 0 && sample.time - this.circleStartTime > 1500) {
+        this._resetCircleDetection();
+      }
     }
-    
-    // Extract acceleration vectors
-    const positions = samples.map(s => ({ x: s.smoothAccel.x, y: s.smoothAccel.y }));
-    
-    // 1. Test for circular shape using multiple methods
-    const circularityTests = this._testCircularity(positions);
-    
-    // 2. Check for consistent rotation direction
-    const rotationConsistency = this._checkRotationConsistency(positions);
-    
-    // 3. Verify periodic motion pattern
-    const periodicityScore = this._checkPeriodicity(samples);
-    
-    // 4. Estimate circle parameters
-    const circleParams = this._fitCircle(positions);
-    
-    // 5. Validate against shaking patterns
-    const antiShakeScore = this._detectShaking(samples);
-    
-    // Combine all tests
-    const overallQuality = (
-      circularityTests.shape * 0.25 +
-      rotationConsistency * 0.25 +
-      periodicityScore * 0.2 +
-      circleParams.quality * 0.2 +
-      antiShakeScore * 0.1
-    );
-    
-    const isCircular = (
-      overallQuality > 0.65 &&
-      circularityTests.shape > 0.6 &&
-      rotationConsistency > 0.5 &&
-      antiShakeScore > 0.7 &&
-      circleParams.radius > 0.08 &&
-      circleParams.radius < 0.8
-    );
-    
-    return {
-      isCircular: isCircular,
-      quality: overallQuality,
-      radius: circleParams.radius,
-      centerX: circleParams.centerX,
-      centerY: circleParams.centerY,
-      consistency: rotationConsistency
-    };
   }
   
-  _testCircularity(positions) {
-    if (positions.length < 10) return { shape: 0 };
+  _checkRotation(samples) {
+    if (samples.length < 10) return 0;
     
-    // Find approximate center
-    let sumX = 0, sumY = 0;
-    positions.forEach(p => { sumX += p.x; sumY += p.y; });
-    const centerX = sumX / positions.length;
-    const centerY = sumY / positions.length;
+    let totalAngleChange = 0;
+    let consistentDirection = 0;
+    let lastDirection = 0;
     
-    // Calculate distances from center
-    const distances = positions.map(p => 
-      Math.sqrt((p.x - centerX)**2 + (p.y - centerY)**2)
-    );
-    
-    // Check if distances are reasonably consistent (circular shape)
-    const avgDist = distances.reduce((a, b) => a + b, 0) / distances.length;
-    const distVariance = distances.reduce((sum, d) => sum + (d - avgDist)**2, 0) / distances.length;
-    const distStdDev = Math.sqrt(distVariance);
-    
-    // Circular shape score (lower variance = more circular)
-    const shapeScore = avgDist > 0.05 ? Math.max(0, 1 - (distStdDev / avgDist) * 3) : 0;
-    
-    return { shape: shapeScore };
-  }
-  
-  _checkRotationConsistency(positions) {
-    if (positions.length < 20) return 0;
-    
-    // Calculate angles for each position relative to center
-    let sumX = 0, sumY = 0;
-    positions.forEach(p => { sumX += p.x; sumY += p.y; });
-    const centerX = sumX / positions.length;
-    const centerY = sumY / positions.length;
-    
-    const angles = positions.map(p => 
-      Math.atan2(p.y - centerY, p.x - centerX)
-    );
-    
-    // Check for consistent rotation direction
-    let positiveRotations = 0;
-    let negativeRotations = 0;
-    let totalRotation = 0;
-    
-    for (let i = 1; i < angles.length; i++) {
-      let deltaAngle = angles[i] - angles[i-1];
+    for (let i = 1; i < samples.length; i++) {
+      const curr = samples[i].smoothAccel;
+      const prev = samples[i-1].smoothAccel;
       
-      // Handle wrapping
+      const angle1 = Math.atan2(prev.y - this.circleCenter.y, prev.x - this.circleCenter.x);
+      const angle2 = Math.atan2(curr.y - this.circleCenter.y, curr.x - this.circleCenter.x);
+      
+      let deltaAngle = angle2 - angle1;
       if (deltaAngle > Math.PI) deltaAngle -= TAU;
       if (deltaAngle < -Math.PI) deltaAngle += TAU;
       
-      if (Math.abs(deltaAngle) > 0.05) { // Filter out noise
-        if (deltaAngle > 0) positiveRotations++;
-        else negativeRotations++;
-        totalRotation += Math.abs(deltaAngle);
+      if (Math.abs(deltaAngle) > 0.02) {
+        totalAngleChange += Math.abs(deltaAngle);
+        const direction = Math.sign(deltaAngle);
+        
+        if (lastDirection === 0) lastDirection = direction;
+        else if (direction === lastDirection) consistentDirection++;
       }
     }
     
-    const totalChanges = positiveRotations + negativeRotations;
-    if (totalChanges < 5) return 0;
+    const rotationAmount = Math.min(1, totalAngleChange / (Math.PI * 0.5));
+    const directionConsistency = samples.length > 5 ? consistentDirection / (samples.length - 1) : 0;
     
-    // Consistency = how much we favor one direction
-    const directionConsistency = Math.abs(positiveRotations - negativeRotations) / totalChanges;
-    
-    // Also check if we have reasonable total rotation
-    const rotationAmount = Math.min(1, totalRotation / (Math.PI * 0.5)); // At least quarter circle
-    
-    return directionConsistency * rotationAmount;
+    return rotationAmount * (0.3 + 0.7 * directionConsistency);
   }
   
-  _checkPeriodicity(samples) {
-    if (samples.length < 40) return 0;
+  _detectShakes(sample) {
+    if (this.motionHistory.length < 10) return;
     
-    // Look for periodic patterns in acceleration magnitude
-    const accelMags = samples.map(s => s.accelMag);
+    // Analyze rapid acceleration changes (characteristic of shaking)
+    const recent = this.motionHistory.slice(-20); // Last 0.4 seconds
     
-    // Simple autocorrelation for periodicity detection
-    let bestCorrelation = 0;
-    const minPeriod = 8;  // Min samples for a period
-    const maxPeriod = Math.floor(samples.length / 3);
+    let rapidChangeCount = 0;
+    let totalAccelChange = 0;
+    let avgFrequency = 0;
     
-    for (let period = minPeriod; period <= maxPeriod; period++) {
-      let correlation = 0;
-      let count = 0;
+    for (let i = 1; i < recent.length; i++) {
+      const curr = recent[i];
+      const prev = recent[i-1];
       
-      for (let i = 0; i < accelMags.length - period; i++) {
-        correlation += accelMags[i] * accelMags[i + period];
-        count++;
+      // Calculate acceleration change
+      const accelChange = Math.sqrt(
+        (curr.smoothAccel.x - prev.smoothAccel.x)**2 +
+        (curr.smoothAccel.y - prev.smoothAccel.y)**2
+      );
+      
+      totalAccelChange += accelChange;
+      
+      // Check for rapid direction changes (shaking pattern)
+      if (accelChange > 1.0) {
+        rapidChangeCount++;
       }
       
-      if (count > 0) {
-        correlation /= count;
-        bestCorrelation = Math.max(bestCorrelation, correlation);
-      }
-    }
-    
-    // Normalize correlation
-    const avgMagSquared = accelMags.reduce((sum, mag) => sum + mag * mag, 0) / accelMags.length;
-    const periodicityScore = avgMagSquared > 0 ? Math.min(1, bestCorrelation / avgMagSquared) : 0;
-    
-    return Math.max(0, periodicityScore);
-  }
-  
-  _fitCircle(positions) {
-    if (positions.length < 3) {
-      return { centerX: 0, centerY: 0, radius: 0, quality: 0 };
-    }
-    
-    // Simple centroid-based circle fitting
-    let sumX = 0, sumY = 0;
-    positions.forEach(p => { sumX += p.x; sumY += p.y; });
-    const centerX = sumX / positions.length;
-    const centerY = sumY / positions.length;
-    
-    // Calculate average radius
-    const distances = positions.map(p => 
-      Math.sqrt((p.x - centerX)**2 + (p.y - centerY)**2)
-    );
-    const avgRadius = distances.reduce((a, b) => a + b, 0) / distances.length;
-    
-    // Quality based on how well points fit the circle
-    const radiusVariance = distances.reduce((sum, d) => sum + (d - avgRadius)**2, 0) / distances.length;
-    const quality = avgRadius > 0.02 ? Math.max(0, 1 - Math.sqrt(radiusVariance) / avgRadius) : 0;
-    
-    return {
-      centerX: centerX,
-      centerY: centerY,
-      radius: avgRadius,
-      quality: quality
-    };
-  }
-  
-  _detectShaking(samples) {
-    if (samples.length < 20) return 1;
-    
-    // Shaking typically has:
-    // 1. High frequency changes in direction
-    // 2. No consistent circular pattern
-    // 3. Back-and-forth motion rather than continuous rotation
-    
-    let directionChanges = 0;
-    let backAndForthMotion = 0;
-    
-    for (let i = 2; i < samples.length; i++) {
-      const curr = samples[i].smoothAccel;
-      const prev = samples[i-1].smoothAccel;
-      const prev2 = samples[i-2].smoothAccel;
-      
-      // Check for direction reversals (shaking indicator)
-      const vel1 = { x: prev.x - prev2.x, y: prev.y - prev2.y };
-      const vel2 = { x: curr.x - prev.x, y: curr.y - prev.y };
-      const dotProduct = vel1.x * vel2.x + vel1.y * vel2.y;
-      
-      if (dotProduct < -0.1) { // Opposite directions
-        directionChanges++;
-      }
-      
-      // Check for back-and-forth vs circular motion
-      const dist1 = Math.sqrt(vel1.x**2 + vel1.y**2);
-      const dist2 = Math.sqrt(vel2.x**2 + vel2.y**2);
-      
-      if (dist1 > 0.1 && dist2 > 0.1 && dotProduct < 0) {
-        backAndForthMotion++;
+      // Estimate frequency from zero crossings
+      const dotProduct = curr.smoothAccel.x * prev.smoothAccel.x + 
+                        curr.smoothAccel.y * prev.smoothAccel.y;
+      if (dotProduct < 0 && (curr.accelMag > 0.5 && prev.accelMag > 0.5)) {
+        avgFrequency += 1.0 / Math.max(0.02, curr.dt);
       }
     }
     
-    const totalSamples = samples.length - 2;
-    const shakeRatio = directionChanges / totalSamples;
-    const backForthRatio = backAndForthMotion / totalSamples;
+    // Calculate shake metrics
+    const changeRate = rapidChangeCount / recent.length;
+    const avgAccelChange = totalAccelChange / recent.length;
+    this.shakeFrequency = avgFrequency / Math.max(1, recent.length - 1);
     
-    // Higher shake indicators = lower anti-shake score
-    const antiShakeScore = Math.max(0, 1 - shakeRatio * 2 - backForthRatio * 1.5);
+    // Shake intensity based on change rate and magnitude
+    this.shakeIntensity = Math.min(1, (changeRate * 2 + avgAccelChange / 3) * 0.5);
     
-    return antiShakeScore;
+    // Detect shake event
+    if (this.shakeIntensity > 0.6 && 
+        this.shakeFrequency > this.shakeMinFreq && 
+        sample.accelMag > this.shakeThreshold) {
+      
+      if (this.shakeStartTime === 0) {
+        this.shakeStartTime = sample.time;
+      } else if (sample.time - this.shakeStartTime > 200) { // 200ms minimum shake duration
+        this._onShakeDetected(this.shakeIntensity, this.shakeFrequency);
+        this.shakeStartTime = sample.time; // Reset for next shake
+      }
+    } else if (this.shakeIntensity < 0.3) {
+      this.shakeStartTime = 0; // Reset if shaking stops
+    }
   }
   
-  _validateCompleteCircle(duration, analysis) {
-    return (
-      duration >= this.minCircleTime &&
-      duration <= this.maxCircleTime &&
-      analysis.quality >= 0.7 &&
-      analysis.consistency >= 0.6 &&
-      analysis.radius >= this.minRadius &&
-      analysis.radius <= this.maxRadius
-    );
+  _resetCircleDetection() {
+    this.circleProgress = 0;
+    this.totalRotation = 0;
+    this.lastAngle = null;
+    this.circleStartTime = 0;
+    this.circleQuality = 0;
   }
   
   _updateVisualization(sample) {
     // Draw motion path
-    const x = this.centerX + (sample.smoothAccel.x * 40);
-    const y = this.centerY + (sample.smoothAccel.y * 40);
+    const scale = 50; // Scale factor for visualization
+    const x = this.centerX + (sample.smoothAccel.x * scale);
+    const y = this.centerY + (sample.smoothAccel.y * scale);
     
-    this.ctx.strokeStyle = `hsl(${(this.circleProgress * 240)}, 70%, 60%)`;
-    this.ctx.globalAlpha = 0.8;
+    // Color based on dominant motion type
+    let hue = 120; // Default green
+    if (this.shakeIntensity > 0.5) hue = 15; // Orange for shake
+    else if (this.circleQuality > 0.4) hue = 200; // Blue for circle
     
-    if (!this.pathStarted) {
+    this.ctx.strokeStyle = `hsl(${hue}, 70%, 60%)`;
+    this.ctx.globalAlpha = 0.7;
+    
+    if (!this.pathStarted || this.motionHistory.length < 2) {
       this.ctx.beginPath();
       this.ctx.moveTo(x, y);
       this.pathStarted = true;
@@ -612,70 +495,107 @@ class CircularMotionDetector {
     
     // Update dot position
     this.dot.style.transform = `translate(${x - this.centerX}px, ${y - this.centerY}px)`;
-    
-    // Show circle indicator if detecting
-    if (this.circleProgress > 0.1) {
-      this.indicator.style.display = 'block';
-    } else {
-      this.indicator.style.display = 'none';
-    }
   }
   
-  _updateProgress() {
-    const progressBar = document.getElementById('progressBar');
-    const progressText = document.getElementById('progressText');
-    const percent = Math.round(this.circleProgress * 100);
+  _updateUI() {
+    // Progress bars
+    const circleBar = document.getElementById('circleBar');
+    const shakeBar = document.getElementById('shakeBar');
     
-    if (progressBar) progressBar.style.width = `${percent}%`;
-    if (progressText) progressText.textContent = `Circular motion: ${percent}%`;
-  }
-  
-  _updateHUD(centripetal, angularVel, quality, energy, radius) {
-    const elements = {
-      'centripetal': centripetal.toFixed(2) + ' m/s²',
-      'angularVel': angularVel.toFixed(0) + ' °/s',
-      'quality': Math.round(quality * 100) + '%',
-      'energy': energy.toFixed(2),
-      'radius': Math.round(radius * 100) + ' cm'
+    if (circleBar) circleBar.style.width = `${Math.round(this.circleProgress * 100)}%`;
+    if (shakeBar) shakeBar.style.width = `${Math.round(this.shakeIntensity * 100)}%`;
+    
+    // Data display
+    const updates = {
+      'motionType': this.shakeIntensity > 0.5 ? 'Shaking' : 
+                   this.circleQuality > 0.4 ? 'Circular' : 'Linear',
+      'circleScore': `${Math.round(this.circleQuality * 100)}%`,
+      'shakeScore': `${Math.round(this.shakeIntensity * 100)}%`,
+      'angularVel': this.lastAngle !== null ? `${Math.round(Math.abs(this.totalRotation) * DEG / Math.max(0.1, (this.lastTime - this.circleStartTime) / 1000))} °/s` : '0 °/s',
+      'frequency': `${this.shakeFrequency.toFixed(1)} Hz`,
+      'radius': `${Math.round(this.circleRadius * 100)} cm`
     };
     
-    Object.entries(elements).forEach(([id, text]) => {
+    Object.entries(updates).forEach(([id, value]) => {
       const el = document.getElementById(id);
-      if (el) el.textContent = text;
+      if (el) el.textContent = value;
     });
   }
   
   _onCircleDetected(duration, radius, quality) {
+    console.log('🔄 Circle detected!', { duration, radius, quality });
+    
     // Visual feedback
-    document.body.style.background = 'linear-gradient(135deg,#4CAF50 0%,#45a049 100%)';
+    document.body.style.background = 'linear-gradient(135deg,#2196F3 0%,#03DAC6 100%)';
     setTimeout(() => {
       document.body.style.background = 'linear-gradient(135deg,#667eea 0%,#764ba2 100%)';
-    }, 800);
+    }, 600);
     
     // Status update
     const status = document.getElementById('status');
     if (status) {
-      status.textContent = '🎉 Circular motion detected!';
-      status.className = 'status detecting';
+      status.textContent = '🔄 Circle motion detected!';
+      status.className = 'status circle';
       setTimeout(() => {
-        status.textContent = 'Ready! Move your arm in circles';
+        status.textContent = 'Ready! Make circles or shakes';
         status.className = 'status active';
       }, 1500);
     }
     
     // Add to history
+    this._addToHistory('circle', `Circle: ${duration.toFixed(1)}s, ${Math.round(radius*100)}cm, ${Math.round(quality*100)}%`);
+    
+    // Haptic feedback
+    if ('vibrate' in navigator) navigator.vibrate([100, 50, 100, 50, 100]);
+    
+    // Fire custom event
+    window.dispatchEvent(new CustomEvent('circleDetected', { 
+      detail: { duration, radius, quality } 
+    }));
+    
+    this._resetCircleDetection();
+  }
+  
+  _onShakeDetected(intensity, frequency) {
+    console.log('🤝 Shake detected!', { intensity, frequency });
+    
+    // Visual feedback  
+    document.body.style.background = 'linear-gradient(135deg,#FF5722 0%,#FF9800 100%)';
+    setTimeout(() => {
+      document.body.style.background = 'linear-gradient(135deg,#667eea 0%,#764ba2 100%)';
+    }, 400);
+    
+    // Status update
+    const status = document.getElementById('status');
+    if (status) {
+      status.textContent = '🤝 Shake motion detected!';
+      status.className = 'status shake';
+      setTimeout(() => {
+        status.textContent = 'Ready! Make circles or shakes';
+        status.className = 'status active';
+      }, 1200);
+    }
+    
+    // Add to history
+    this._addToHistory('shake', `Shake: intensity ${Math.round(intensity*100)}%, ${frequency.toFixed(1)}Hz`);
+    
+    // Haptic feedback
+    if ('vibrate' in navigator) navigator.vibrate([80, 40, 80]);
+    
+    // Fire custom event  
+    window.dispatchEvent(new CustomEvent('shakeDetected', { 
+      detail: { intensity, frequency } 
+    }));
+  }
+  
+  _addToHistory(type, text) {
     const history = document.getElementById('history');
     if (history) {
       const div = document.createElement('div');
-      div.className = 'detection-item';
-      div.textContent = `${new Date().toLocaleTimeString()}: Circle (${duration.toFixed(1)}s, r=${Math.round(radius*100)}cm, q=${Math.round(quality*100)}%)`;
+      div.className = `detection-item ${type}`;
+      div.textContent = `${new Date().toLocaleTimeString()}: ${text}`;
       history.appendChild(div);
       history.scrollTop = history.scrollHeight;
-    }
-    
-    // Haptic feedback
-    if ('vibrate' in navigator) {
-      navigator.vibrate([150, 100, 150]);
     }
   }
 }
@@ -689,9 +609,8 @@ function startDetection() {
   
   const canvas = document.getElementById('pathCanvas');
   const dot = document.getElementById('motionDot');
-  const indicator = document.getElementById('circleIndicator');
   
-  detector = new CircularMotionDetector(canvas, dot, indicator);
+  detector = new MotionDetector(canvas, dot);
   
   window.addEventListener('devicemotion', onMotionEvent, { passive: true });
   isActive = true;
@@ -732,38 +651,51 @@ function stopDetection() {
   
   document.getElementById('startBtn').style.display = 'inline-block';
   document.getElementById('stopBtn').style.display = 'none';
-  document.getElementById('circleIndicator').style.display = 'none';
 }
 
 function onMotionEvent(event) {
-  if (detector) {
-    detector.addMotionSample(
-      event.acceleration,
-      event.accelerationIncludingGravity,
-      event.rotationRate,
-      event.timeStamp || performance.now()
-    );
-  }
+  if (!detector) return;
+
+  // Normalize objects (some browsers return null components)
+  const normalizeVec3 = (v) => {
+    if (!v) return null;
+    const nx = Number.isFinite(v.x) ? v.x : 0;
+    const ny = Number.isFinite(v.y) ? v.y : 0;
+    const nz = Number.isFinite(v.z) ? v.z : 0;
+    return { x: nx, y: ny, z: nz };
+  };
+
+  const acceleration = normalizeVec3(event.acceleration);
+  const accelerationGravity = normalizeVec3(event.accelerationIncludingGravity);
+  const rotationRate = event.rotationRate ? {
+    alpha: Number.isFinite(event.rotationRate.alpha) ? event.rotationRate.alpha : 0,
+    beta:  Number.isFinite(event.rotationRate.beta)  ? event.rotationRate.beta  : 0,
+    gamma: Number.isFinite(event.rotationRate.gamma) ? event.rotationRate.gamma : 0
+  } : null;
+
+  // Use event.timeStamp if available; fall back to performance.now()
+  const ts = (typeof event.timeStamp === 'number') ? event.timeStamp : performance.now();
+
+  detector.addMotionSample(acceleration, accelerationGravity, rotationRate, ts);
 }
 
+// Simple helper hooked to the "Clear History" button
 function clearHistory() {
   const history = document.getElementById('history');
   if (history) history.innerHTML = '';
-  
-  const progressBar = document.getElementById('progressBar');
-  const progressText = document.getElementById('progressText');
-  if (progressBar) progressBar.style.width = '0%';
-  if (progressText) progressText.textContent = 'Circular motion: 0%';
-  
-  if (detector) detector._resetDetection();
-}
 
-// Handle window resize
-window.addEventListener('resize', () => {
-  if (detector) {
-    detector._setupCanvas();
+  // Reset visuals and metrics
+  if (detector) detector._resetDetection();
+
+  const status = document.getElementById('status');
+  if (status) {
+    status.textContent = 'Ready! Make circles or shakes';
+    status.className = 'status active';
   }
-});
+
+  const notice = document.getElementById('sensorNotice');
+  if (notice) notice.style.display = 'none';
+}
 </script>
 </body>
 </html>
