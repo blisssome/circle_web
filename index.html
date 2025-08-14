@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Wrist/Elbow Revolution — Velocity Turning Angle (No Prompts)</title>
+<title>Rapid Wrist/Elbow Circle — Accel-Angle Bandpass (No Prompts)</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{
@@ -45,14 +45,13 @@
   button:hover{background:rgba(255,255,255,.28);transform:translateY(-1px)}
   button:active{transform:translateY(0)}
   #sensorNotice{display:none;margin-top:8px;padding:10px;border-radius:10px;background:rgba(255,107,107,.18);border:1px solid rgba(255,107,107,.5);font-size:13px;text-align:left}
-  #debugInfo{display:none;margin-top:6px;font:12px ui-monospace,monospace;opacity:.9;text-align:left;white-space:pre-wrap}
 </style>
 </head>
 <body>
   <div class="container">
-    <h1>🔄 Wrist/Elbow Revolution — Velocity Turning Angle</h1>
+    <h1>🔄 Rapid Wrist/Elbow Circle (No Prompts)</h1>
 
-    <div id="status" class="status">Tap “Start”, hold still 1s, then draw a smooth circle</div>
+    <div id="status" class="status">Tap “Start”, hold still 1s, then do ONE quick circle</div>
 
     <div class="visual">
       <canvas id="pathCanvas"></canvas>
@@ -69,11 +68,10 @@
     </div>
 
     <div class="data-display">
-      <div>|a⟂g| (m/s²): <span id="planarA">0.00</span></div>
-      <div>|v| (a→v): <span id="planarV">0.00</span></div>
-      <div>turn ω (deg/s): <span id="omega">0</span></div>
+      <div>|a⟂g| bandpass (m/s²): <span id="aBP">0.00</span></div>
+      <div>φ̇ (deg/s): <span id="omegaPhi">0</span></div>
       <div>coherence: <span id="coh">0.00</span></div>
-      <div>path length (m est): <span id="plen">0.00</span></div>
+      <div>valid%: <span id="vfrac">0%</span></div>
     </div>
 
     <div class="detection-history">
@@ -83,18 +81,13 @@
 
     <div id="sensorNotice">
       <strong>No motion data received.</strong><br>
-      If you’re on iPhone/iPad: Safari → tap “aA” → Website Settings → <em>Motion &amp; Orientation Access</em> → ON, then reload.<br>
-      On Android (Chrome): lock icon → Site settings → <em>Motion sensors</em> → Allow.
+      iPhone/iPad: Safari → “aA” → Website Settings → Motion & Orientation Access → ON, then reload.<br>
+      Android Chrome: lock icon → Site settings → Motion sensors → Allow.
     </div>
-
-    <div id="debugInfo"></div>
   </div>
 
 <script>
-/* ========= NO-PROMPT VERSION ========= */
-const DEBUG = false;
-
-/* ---- helpers ---- */
+/* ------------- No-permission version ------------- */
 const TAU = Math.PI*2, DEG = Math.PI/180;
 const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
 const unwrap=d=>(d>Math.PI?d-TAU:d<-Math.PI?d+TAU:d);
@@ -104,65 +97,55 @@ function norm(v){const n=hypot3(v.x,v.y,v.z)||1;return {x:v.x/n,y:v.y/n,z:v.z/n}
 function median(a){if(!a.length)return 0;const s=[...a].sort((x,y)=>x-y);const m=Math.floor(s.length/2);return s.length%2?s[m]:(s[m-1]+s[m])/2;}
 function mad(a,m=null){if(!a.length)return 0;if(m==null)m=median(a);const d=a.map(x=>Math.abs(x-m));return median(d);}
 
-class VelocityTurningDetector{
+class RapidCircleDetector {
   constructor(canvas,dot){
-    /* --- friendly tunables (you can tweak these few) --- */
-    this.progressTarget = TAU*0.5;     // ~306° counts as a revolution
-    this.segMinDur = 0.18;              // allow fast loops
-    this.segMaxDur = 12.0;
-    this.gapMsAllow = 350;
+    /* ---- tuned for “one quick circle” ---- */
+    this.progressTarget = TAU * 0.90;   // need ~324° of rotation
+    this.segMinDur = 0.15;              // super fast allowed
+    this.segMaxDur = 2.20;              // must be “rapid”
+    this.gapMsAllow = 180;              // short drop tolerance
 
-    this.betaMs = 0.08;                 // accel smoothing (~80ms)
-    this.gTau   = 0.25;                 // gravity LPF time constant
+    // band-pass for accel in plane: ~0.5–6 Hz
+    this.hpTau = 0.28;                  // ~0.57 Hz
+    this.lpTau = 0.06;                  // ~2.6 Hz (keeps it snappy)
 
-    this.velTauActive = 2.5;            // slower leak when moving (longer memory)
-    this.velTauQuiet  = 0.40;           // faster leak when quiet
-    this.posTau       = 10.0;           // very light leak on position
+    // gating
+    this.aBPmin = 0.45;                 // m/s² min bandpassed magnitude to count
+    this.omegaPhiMin = 1.3;             // rad/s (~75°/s) turning speed floor
+    this.omegaPhiOff = 1.0;             // hysteresis
 
-    // thresholds (auto-calibrated then clamped)
-    this.aFloor = 0.05;                 // m/s²
-    this.vFloor = 0.05;                 // speed units
-    this.omegaMin = 0.1;               // rad/s (~14°/s) to count as "turning"
-    this.omegaOff = 0.2;
+    // directional consistency
+    this.cohTau = 0.6;                  // EWMA window ~0.6s
+    this.cohMin = 0.65;                 // mostly one way
 
-    // consistency of turning direction (0.5=random, 1.0=single direction)
-    this.cohTau = 1.0;                  // seconds
-    this.cohMin = 0.52;                 // slightly > 0.5 to reject jitter
+    // segment-level validity requirements
+    this.minValidFrac = 0.55;           // ≥55% of samples “valid”
+    this.minAvgABP    = 0.55;           // average bandpass amplitude over segment
 
-    // require some literal movement to avoid tiny in-place wiggles
-    this.minPathLen = 0.12;             // meters (estimated from a→v integration)
-
-    // ---- state ----
+    // canvas & UI
     this.canvas=canvas; this.ctx=canvas.getContext('2d'); this.dot=dot;
     this.dpr=Math.max(1,window.devicePixelRatio||1);
     this.uiAlpha=0.25; this._uiX=0; this._uiY=0;
 
-    this.g=null; this.lastT=0;
+    // state
+    this.lastT=0; this.g=null;
+    this.uPrev=0; this.vPrev=0;         // for HP filter
+    this.uHP=0; this.vHP=0;             // high-pass state
+    this.uBP=0; this.vBP=0;             // low-pass (bandpass output)
 
-    this.uLP=0; this.vLP=0;          // smoothed planar accel
-    this.uVel=0; this.vVel=0;        // integrated velocity
-    this.uPos=0; this.vPos=0;        // integrated position
-    this.prevPhi=null;               // angle of velocity
-    this.turnAbs=0;                  // sum |Δphi|
-    this.progress=0;
+    this.prevPhi=null; this.turnAbs=0; this.progress=0;
     this.segStart=null; this.lastGoodMs=0;
+    this.posEW=0; this.negEW=0;
 
-    this.posEW=0; this.negEW=0;      // coherence EWMA
-    this.pathLen=0;                  // ∫|v|dt
+    // segment stats
+    this.validCount=0; this.totalCount=0; this.sumABP=0;
 
-    this.lastDetectMs=0; this.cooldownMs=1200;
-
-    this.debugEl=document.getElementById('debugInfo'); if (DEBUG) this.debugEl.style.display='block';
-
-    window.addEventListener('resize',()=>{this.resize();this.resetCanvas();},{passive:true});
-    this.resize(); this.resetCanvas();
-
-    // 1s auto-calibration
-    this.calibrating=true; this.calibStart=0; this.calibA=[]; this.calibW=[];
-    this._startCalibration();
+    // calibration (noise floors) — 1s
+    this.calibrating=true; this.calibStart=performance.now(); this.calA=[]; this.calPhiDot=[];
+    this._setupCanvas();
   }
 
-  resize(){
+  _setupCanvas(){
     const cw=this.canvas.clientWidth, ch=this.canvas.clientHeight;
     this.canvas.width=Math.floor(cw*this.dpr);
     this.canvas.height=Math.floor(ch*this.dpr);
@@ -170,62 +153,47 @@ class VelocityTurningDetector{
     this.cx=this.w/2; this.cy=this.h/2;
     this.padPx=6*this.dpr;
     this.R=Math.min(this.cx,this.cy)-this.padPx;
-    this.rDraw=this.R*0.65;
-
+    this.rDraw=this.R*0.70;
     this.ctx.setTransform(1,0,0,1,0,0);
     this.ctx.lineWidth=2*this.dpr; this.ctx.lineCap='round'; this.ctx.lineJoin='round';
     this.ctx.strokeStyle='rgba(255,255,255,.95)';
+    this._resetCanvas();
+    window.addEventListener('resize',()=>this._setupCanvas(),{passive:true});
   }
-
-  resetCanvas(){
+  _resetCanvas(){
     this.ctx.clearRect(0,0,this.w,this.h);
     this.ctx.save(); this.ctx.globalAlpha=.18;
     this.ctx.beginPath(); this.ctx.arc(this.cx,this.cy,this.R,0,TAU); this.ctx.stroke(); this.ctx.restore();
-    this.ctx.save(); this.ctx.beginPath(); this.ctx.arc(this.cx,this.cy,this.R-this.ctx.lineWidth*0.5,0,TAU); this.ctx.clip();
+    this.ctx.save(); this.ctx.beginPath(); this.ctx.arc(this.cx,this.cy,this.R - this.ctx.lineWidth*0.5,0,TAU); this.ctx.clip();
     this.pathStarted=false;
 
-    this.uLP=this.vLP=0; this.uVel=this.vVel=0; this.uPos=this.vPos=0;
     this.prevPhi=null; this.turnAbs=0; this.progress=0;
     this.segStart=null; this.lastGoodMs=0;
-    this.posEW=this.negEW=0; this.pathLen=0;
+    this.posEW=this.negEW=0;
+    this.validCount=this.totalCount=this.sumABP=0;
 
     this._lastXPix=this.cx; this._lastYPix=this.cy;
     this._renderProgress(); this._moveDot();
   }
 
-  _startCalibration(){
-    this.calibrating=true; this.calibA.length=0; this.calibW.length=0; this.calibStart=performance.now();
-    const st=document.getElementById('status'); if (st){ st.textContent='Calibrating… hold still for 1s'; st.className='status'; }
-  }
-  _finishCalibration(){
-    const aMed=median(this.calibA), aMAD=mad(this.calibA,aMed)*1.4826;
-    const wMed=median(this.calibW), wMAD=mad(this.calibW,wMed)*1.4826;
-    this.aFloor   = Math.min(0.12, Math.max(0.03, aMed + 6*aMAD));
-    this.vFloor   = Math.min(0.12, 0.04 + 4*aMAD); // tie a bit to accel noise
-    this.omegaMin = Math.min(0.70, Math.max(0.18, wMed + 4*wMAD));
-    this.omegaOff = Math.min(0.55, Math.max(0.15, wMed + 3*wMAD));
-    this.calibrating=false;
-    const st=document.getElementById('status'); if (st){ st.textContent='Listening… draw a smooth wrist/elbow circle'; st.className='status active'; }
-  }
-
-  addSample(acc,accG,rr){
+  addSample(acc,accG){
     const now=performance.now();
     const dt=this.lastT?Math.max(0.001,(now-this.lastT)/1000):0.016;
     this.lastT=now;
 
-    // --- gravity init/update ---
+    // gravity estimate (LPF on incl. gravity)
     if(!this.g){
       if(accG && Number.isFinite(accG.x)) this.g={x:accG.x,y:accG.y,z:accG.z};
       else if(acc && Number.isFinite(acc.x)){ const m=hypot3(acc.x,acc.y,acc.z); if(m>7.5) this.g={x:acc.x,y:acc.y,z:acc.z}; else return; }
       else return;
     } else {
-      const a=Math.exp(-dt/this.gTau);
+      const a=Math.exp(-dt/0.25);
       if(accG && Number.isFinite(accG.x)){
         this.g.x=a*this.g.x+(1-a)*accG.x; this.g.y=a*this.g.y+(1-a)*accG.y; this.g.z=a*this.g.z+(1-a)*accG.z;
       }
     }
 
-    // --- project to plane ⟂ g ---
+    // linear accel (remove gravity) → plane ⟂ g
     let ax=0,ay=0,az=0;
     if(acc && Number.isFinite(acc.x)){ ax=acc.x; ay=acc.y; az=acc.z; }
     else if(accG){ ax=accG.x-this.g.x; ay=accG.y-this.g.y; az=accG.z-this.g.z; }
@@ -237,67 +205,70 @@ class VelocityTurningDetector{
     const dotg=ax*gn.x+ay*gn.y+az*gn.z;
     const px=ax-dotg*gn.x, py=ay-dotg*gn.y, pz=az-dotg*gn.z;
 
-    const u=px*e1.x+py*e1.y+pz*e1.z;
-    const v=px*e2.x+py*e2.y+pz*e2.z;
+    let u=px*e1.x+py*e1.y+pz*e1.z;
+    let v=px*e2.x+py*e2.y+pz*e2.z;
 
-    // --- smooth accel ---
-    const beta=Math.exp(-dt/this.betaMs);
-    this.uLP=beta*this.uLP+(1-beta)*u;
-    this.vLP=beta*this.vLP+(1-beta)*v;
-    const aPlanar=Math.hypot(this.uLP,this.vLP);
+    // -------- band-pass (HP then LP) --------
+    // High-pass: y = α*(y + x - x_prev), α = τ/(τ+dt)
+    const aHP = this.hpTau/(this.hpTau+dt);
+    this.uHP = aHP*(this.uHP + u - this.uPrev);
+    this.vHP = aHP*(this.vHP + v - this.vPrev);
+    this.uPrev = u; this.vPrev = v;
 
-    // --- integrate to velocity with leak (active vs quiet) ---
-    const leak=Math.exp(-dt/(aPlanar>=this.aFloor?this.velTauActive:this.velTauQuiet));
-    this.uVel=leak*this.uVel + this.uLP*dt;
-    this.vVel=leak*this.vVel + this.vLP*dt;
+    // Low-pass on HP output: y = exp(-dt/τ)*y + (1-exp(-dt/τ))*x
+    const aLP = Math.exp(-dt/this.lpTau);
+    this.uBP = aLP*this.uBP + (1-aLP)*this.uHP;
+    this.vBP = aLP*this.vBP + (1-aLP)*this.vHP;
 
-    // ZUPT-ish
-    const speed=Math.hypot(this.uVel,this.vVel);
-    if(aPlanar<this.aFloor && speed<this.vFloor){ this.uVel=0; this.vVel=0; }
+    const aBPmag = Math.hypot(this.uBP,this.vBP);
 
-    // --- integrate to position (light leak) + path length ---
-    const posLeak=Math.exp(-dt/this.posTau);
-    this.uPos=posLeak*this.uPos + this.uVel*dt;
-    this.vPos=posLeak*this.vPos + this.vVel*dt;
-    this.pathLen += speed*dt;
+    // angle of band-passed acceleration (centripetal direction)
+    const phi = Math.atan2(this.vBP, this.uBP);
+    if(this.prevPhi==null) this.prevPhi=phi;
+    const dphi = unwrap(phi - this.prevPhi);
+    this.prevPhi = phi;
 
-    // --- velocity direction & turning angle ---
-    const phiNow=Math.atan2(this.vVel,this.uVel);
-    if(this.prevPhi==null) this.prevPhi=phiNow;
-    const dphi=unwrap(phiNow - this.prevPhi);
-    this.prevPhi=phiNow;
+    const phiDot = Math.abs(dphi)/dt; // rad/s
 
-    const omega=Math.abs(dphi)/dt; // rad/s
-
-    // --- draw on a fixed ring for clarity ---
-    const x=this.cx + this.rDraw*Math.cos(phiNow);
-    const y=this.cy + this.rDraw*Math.sin(phiNow);
+    // draw on fixed ring (clean)
+    const x=this.cx + this.rDraw*Math.cos(phi);
+    const y=this.cy + this.rDraw*Math.sin(phi);
     if(!this.pathStarted){ this.ctx.beginPath(); this.ctx.moveTo(x,y); this.pathStarted=true; }
     else { this.ctx.lineTo(x,y); this.ctx.stroke(); }
     this._lastXPix=x; this._lastYPix=y; this._moveDot();
 
-    // --- calibration phase ---
+    // calibration (1s): set floors gently above noise, then go
     if(this.calibrating){
-      this.calibA.push(aPlanar);
-      this.calibW.push(omega);
-      if(now - this.calibStart > 1000) this._finishCalibration();
-      this._hud(aPlanar, speed, omega);
+      this.calA.push(aBPmag); this.calPhiDot.push(phiDot);
+      if(now - this.calibStart > 1000){
+        const aMed=median(this.calA), aMAD=mad(this.calA,aMed)*1.4826;
+        const wMed=median(this.calPhiDot), wMAD=mad(this.calPhiDot,wMed)*1.4826;
+        this.aBPmin = Math.min(0.70, Math.max(0.35, aMed + 6*aMAD));
+        this.omegaPhiMin = Math.min(2.2, Math.max(1.0, wMed + 5*wMAD));  // demand *rapid* turning
+        this.omegaPhiOff = Math.max(0.8, this.omegaPhiMin*0.75);
+        this.calibrating=false;
+        const st=document.getElementById('status'); if(st){st.textContent='Listening… do ONE quick circle'; st.className='status active';}
+      }
+      this._hud(aBPmag, phiDot, 0.5, 0);
       return;
     }
 
-    // --- direction coherence (EWMA) ---
-    const cohDecay=Math.exp(-dt/this.cohTau);
-    this.posEW=cohDecay*this.posEW + Math.max(0, dphi);
-    this.negEW=cohDecay*this.negEW + Math.max(0,-dphi);
-    const coh=(this.posEW+this.negEW)>1e-6 ? Math.max(this.posEW,this.negEW)/(this.posEW+this.negEW) : 0.5;
+    // validity & coherence
+    const enoughSpeed = phiDot >= (this.segStart?this.omegaPhiOff:this.omegaPhiMin);
+    const valid = (aBPmag >= this.aBPmin) && enoughSpeed;
 
-    // --- gate: moving + minimal turning speed + direction consistency ---
-    const moving = (speed>=this.vFloor) || (aPlanar>=this.aFloor);
-    const enoughOmega = omega >= (this.segStart?this.omegaOff:this.omegaMin);
-    const gate = moving && enoughOmega && coh >= this.cohMin;
+    // coherence EWMA (directional consistency)
+    const cDecay = Math.exp(-dt/this.cohTau);
+    this.posEW = cDecay*this.posEW + Math.max(0, dphi);
+    this.negEW = cDecay*this.negEW + Math.max(0,-dphi);
+    const coh = (this.posEW+this.negEW)>1e-6 ? Math.max(this.posEW,this.negEW)/(this.posEW+this.negEW) : 0.5;
 
-    if(gate){
-      if(!this.segStart){ this.segStart=now; this.turnAbs=0; this.pathLen=0; this.posEW=this.negEW=0; }
+    // segment logic
+    this.totalCount++;
+    if(valid) this.validCount++, this.sumABP += aBPmag;
+
+    if(valid && coh >= this.cohMin){
+      if(!this.segStart){ this.segStart=now; this.turnAbs=0; this.validCount=1; this.totalCount=1; this.sumABP=aBPmag; this.posEW=this.negEW=0; }
       this.turnAbs += Math.abs(dphi);
 
       const prevProg=this.progress;
@@ -306,34 +277,32 @@ class VelocityTurningDetector{
 
       if(prevProg<1 && this.progress>=1){
         const dur=(now - this.segStart)/1000;
-        const cooled=(now - this.lastDetectMs) > this.cooldownMs;
-        if(dur>=this.segMinDur && dur<=this.segMaxDur && this.pathLen>=this.minPathLen && coh>=this.cohMin && cooled){
-          this.lastDetectMs=now; this._onDetected(); this._resetSegment();
-        }else{
-          // if failed final checks, keep running but don’t fire yet
+        const vfrac = this.validCount/Math.max(1,this.totalCount);
+        const avgA  = this.sumABP/Math.max(1,this.validCount);
+        const cooled = true; // very short cooldown not necessary for single-turn
+        if(dur>=this.segMinDur && dur<=this.segMaxDur &&
+           vfrac>=this.minValidFrac && avgA>=this.minAvgABP &&
+           coh>=this.cohMin && cooled){
+          this._onDetected();
+          this._resetSegment();
         }
       }
-      this.lastGoodMs=now;
+      this.lastGoodMs = now;
     } else {
       if(this.segStart){
         if(!this.lastGoodMs) this.lastGoodMs=now;
         if((now - this.lastGoodMs) > this.gapMsAllow){ this._resetSegment(); this.lastGoodMs=0; }
+        this.progress = Math.max(0, this.progress - 0.02);
+        this._renderProgress();
       }
-      this.progress=Math.max(0, this.progress - 0.015);
-      this._renderProgress();
     }
 
-    this._hud(aPlanar, speed, omega);
-    if(DEBUG && this.debugEl){
-      this.debugEl.textContent=
-        `gate:${gate?'1':'0'} prog:${Math.round(this.progress*100)}% `+
-        `a:${aPlanar.toFixed(2)} v:${speed.toFixed(2)} ω:${(omega/DEG|0)} `+
-        `coh:${coh.toFixed(2)} path:${this.pathLen.toFixed(2)}`;
-    }
+    this._hud(aBPmag, phiDot, coh, (this.validCount/Math.max(1,this.totalCount)));
   }
 
   _resetSegment(){
-    this.turnAbs=0; this.progress=0; this.segStart=null; this.pathLen=0;
+    this.segStart=null; this.turnAbs=0; this.progress=0;
+    this.validCount=0; this.totalCount=0; this.sumABP=0;
     this._renderProgress();
   }
 
@@ -344,86 +313,68 @@ class VelocityTurningDetector{
     if(bar) bar.style.width=pct+'%';
     if(txt) txt.textContent=`Revolution progress: ${pct}%`;
   }
-
   _moveDot(){
     const x=(this._lastXPix??this.cx), y=(this._lastYPix??this.cy);
     const cssW=this.canvas.clientWidth, cssH=this.canvas.clientHeight;
     const cssX=(x/this.dpr)-cssW/2, cssY=(y/this.dpr)-cssH/2;
-    this._uiX+=this.uiAlpha*(cssX-this._uiX);
-    this._uiY+=this.uiAlpha*(cssY-this._uiY);
+    this._uiX+=0.25*(cssX-this._uiX);
+    this._uiY+=0.25*(cssY-this._uiY);
     this.dot.style.transform=`translate(calc(-50% + ${this._uiX}px), calc(-50% + ${this._uiY}px))`;
   }
-
-  _hud(a,v,omega){
-    const pa=document.getElementById('planarA'); if(pa) pa.textContent=a.toFixed(2);
-    const pv=document.getElementById('planarV'); if(pv) pv.textContent=v.toFixed(2);
-    const om=document.getElementById('omega');  if(om) om.textContent=(omega/DEG|0);
-    const pl=document.getElementById('plen');   if(pl) pl.textContent=this.pathLen.toFixed(2);
+  _hud(aBP,phiDot,coh,vfrac){
+    const a=document.getElementById('aBP'); if(a) a.textContent=aBP.toFixed(2);
+    const w=document.getElementById('omegaPhi'); if(w) w.textContent=((phiDot/DEG)|0);
+    const c=document.getElementById('coh'); if(c) c.textContent=coh.toFixed(2);
+    const vf=document.getElementById('vfrac'); if(vf) vf.textContent=Math.round(vfrac*100)+'%';
   }
-
   _onDetected(){
     document.body.style.background='linear-gradient(135deg,#4CAF50 0%,#45a049 100%)';
-    setTimeout(()=>{document.body.style.background='linear-gradient(135deg,#667eea 0%,#764ba2 100%)';},700);
-
+    setTimeout(()=>{document.body.style.background='linear-gradient(135deg,#667eea 0%,#764ba2 100%)';},600);
     const s=document.getElementById('status');
-    if(s){ s.textContent='🎉 FULL REVOLUTION'; s.className='status detecting';
-      setTimeout(()=>{ s.textContent='Listening… draw a smooth wrist/elbow circle'; s.className='status active'; },1500); }
-
+    if(s){ s.textContent='🎉 1 rapid revolution'; s.className='status detecting';
+      setTimeout(()=>{ s.textContent='Listening… do ONE quick circle'; s.className='status active'; },1200); }
     const h=document.getElementById('history');
     if(h){ const div=document.createElement('div'); div.className='detection-item';
-      div.textContent=new Date().toLocaleTimeString()+': Full revolution'; h.appendChild(div); }
-    if('vibrate' in navigator) navigator.vibrate([160,100,160]);
+      div.textContent=new Date().toLocaleTimeString()+': Rapid circle detected'; h.appendChild(div); }
+    if('vibrate' in navigator) navigator.vibrate([140,80,140]);
   }
 }
 
-/* ---- wiring ---- */
-let detector=null,isActive=false,probeTimer=null;
-
+/* -------- wiring (no permission prompts) -------- */
+let det=null,isActive=false,probeTimer=null;
 function startDetection(){
-  start();
-  // probe for events in 2s; show inline tip if none
+  if(isActive) return;
+  det=new RapidCircleDetector(document.getElementById('pathCanvas'),document.getElementById('gyroDot'));
+  window.addEventListener('devicemotion', onMotion, {passive:true});
+  isActive=true;
+  const st=document.getElementById('status'); if(st){st.textContent='Calibrating… hold still 1s'; st.className='status';}
+  document.getElementById('startBtn').style.display='none';
+  document.getElementById('stopBtn').style.display='inline-block';
+
+  // probe: show inline tip if no events in 2s
   let got=false;
   const probe=()=>{got=true;window.removeEventListener('devicemotion',probe);};
   window.addEventListener('devicemotion',probe,{passive:true});
   clearTimeout(probeTimer);
   probeTimer=setTimeout(()=>{ if(!got) document.getElementById('sensorNotice').style.display='block'; },2000);
 }
-function start(){
-  if(isActive) return;
-  detector=new VelocityTurningDetector(
-    document.getElementById('pathCanvas'),
-    document.getElementById('gyroDot')
-  );
-  window.addEventListener('devicemotion',onMotion,{passive:true});
-  isActive=true;
-  const st=document.getElementById('status');
-  if(st){st.textContent='Calibrating… hold still for 1s'; st.className='status';}
-  document.getElementById('startBtn').style.display='none';
-  document.getElementById('stopBtn').style.display='inline-block';
-}
 function stopDetection(){
   if(!isActive) return;
-  window.removeEventListener('devicemotion',onMotion);
+  window.removeEventListener('devicemotion', onMotion);
   isActive=false;
-  const st=document.getElementById('status');
-  if(st){st.textContent='Detection stopped'; st.className='status';}
+  const st=document.getElementById('status'); if(st){st.textContent='Detection stopped'; st.className='status';}
   document.getElementById('startBtn').style.display='inline-block';
   document.getElementById('stopBtn').style.display='none';
 }
 function onMotion(e){
-  detector.addSample(
-    e.acceleration || null,
-    e.accelerationIncludingGravity || null,
-    e.rotationRate || null
-  );
+  det.addSample(e.acceleration || null, e.accelerationIncludingGravity || null);
 }
 function clearHistory(){
   const h=document.getElementById('history'); if(h) h.innerHTML='';
   document.getElementById('confidenceBar').style.width='0%';
   document.getElementById('confidenceText').textContent='Revolution progress: 0%';
-  if(detector) detector.resetCanvas();
+  if(det) det._resetCanvas();
 }
-console.log('📱 Velocity-turn detector ready: Start → 1s still → smooth wrist/elbow circle.');
 </script>
 </body>
 </html>
