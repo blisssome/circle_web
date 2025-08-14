@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Circular Motion Detector Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+        }
+
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            max-width: 400px;
+            width: 90%;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        h1 {
+            margin-bottom: 20px;
+            font-size: 24px;
+            font-weight: 600;
+        }
+
+        .status {
+            padding: 15px;
+            border-radius: 10px;
+            margin: 15px 0;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+
+        .status.inactive {
+            background: rgba(255, 107, 107, 0.2);
+            border: 1px solid rgba(255, 107, 107, 0.5);
+        }
+
+        .status.active {
+            background: rgba(76, 175, 80, 0.2);
+            border: 1px solid rgba(76, 175, 80, 0.5);
+        }
+
+        .status.detecting {
+            background: rgba(255, 193, 7, 0.2);
+            border: 1px solid rgba(255, 193, 7, 0.5);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+
+        .data-display {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+            padding: 15px;
+            margin: 15px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            text-align: left;
+        }
+
+        .confidence-bar {
+            width: 100%;
+            height: 20px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+
+        .confidence-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #FFC107, #FF5722);
+            transition: width 0.3s ease;
+            border-radius: 10px;
+        }
+
+        button {
+            background: rgba(255, 255, 255, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px;
+            transition: all 0.3s ease;
+        }
+
+        button:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: translateY(-2px);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        .detection-history {
+            max-height: 150px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+            padding: 10px;
+            margin: 15px 0;
+        }
+
+        .detection-item {
+            padding: 5px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 14px;
+        }
+
+        .gyro-visual {
+            width: 200px;
+            height: 200px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 50%;
+            margin: 20px auto;
+            position: relative;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+        }
+
+        .gyro-dot {
+            width: 10px;
+            height: 10px;
+            background: #4CAF50;
+            border-radius: 50%;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            transition: all 0.1s ease;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔄 Circular Motion Tester</h1>
+        
+        <div id="status" class="status inactive">
+            Tap "Start Detection" to begin
+        </div>
+
+        <div class="gyro-visual">
+            <div id="gyroDot" class="gyro-dot"></div>
+        </div>
+
+        <div class="confidence-bar">
+            <div id="confidenceBar" class="confidence-fill" style="width: 0%"></div>
+        </div>
+        <div id="confidenceText">Confidence: 0%</div>
+
+        <button id="startBtn" onclick="startDetection()">Start Detection</button>
+        <button id="stopBtn" onclick="stopDetection()" style="display: none;">Stop Detection</button>
+        <button onclick="clearHistory()">Clear History</button>
+
+        <div class="data-display">
+            <div>Angular Velocity:</div>
+            <div id="gyroData">X: 0°/s, Y: 0°/s, Z: 0°/s</div>
+            <div>Magnitude: <span id="magnitude">0</span>°/s</div>
+        </div>
+
+        <div class="detection-history">
+            <strong>Detection History:</strong>
+            <div id="history"></div>
+        </div>
+    </div>
+
+    <script>
+        class CircularMotionDetector {
+            constructor() {
+                this.gyroBuffer = [];
+                this.bufferSize = 100;
+                this.minCircularVelocity = 30.0;
+                this.maxCircularVelocity = 200.0;
+                this.minCirclePoints = 20;
+                this.completenessThreshold = 0.7;
+                this.isAnalyzing = false;
+                this.lastDetection = 0;
+                this.rateLimitMs = 3000; // 3 seconds
+            }
+
+            addReading(x, y, z) {
+                const reading = {
+                    timestamp: Date.now(),
+                    x: x * 57.2958, // Convert to degrees/sec
+                    y: y * 57.2958,
+                    z: z * 57.2958
+                };
+
+                this.gyroBuffer.push(reading);
+                if (this.gyroBuffer.length > this.bufferSize) {
+                    this.gyroBuffer.shift();
+                }
+
+                // Update UI
+                this.updateUI(reading);
+
+                // Check for circular motion
+                if (this.gyroBuffer.length >= this.minCirclePoints && !this.isAnalyzing) {
+                    this.checkForCircularMotion();
+                }
+            }
+
+            updateUI(reading) {
+                document.getElementById('gyroData').textContent = 
+                    `X: ${reading.x.toFixed(1)}°/s, Y: ${reading.y.toFixed(1)}°/s, Z: ${reading.z.toFixed(1)}°/s`;
+                
+                const magnitude = Math.sqrt(reading.x*reading.x + reading.y*reading.y + reading.z*reading.z);
+                document.getElementById('magnitude').textContent = magnitude.toFixed(1);
+
+                // Visual gyro dot
+                const dot = document.getElementById('gyroDot');
+                const maxOffset = 90; // pixels
+                const scale = 2; // sensitivity
+                const offsetX = Math.max(-maxOffset, Math.min(maxOffset, reading.x * scale));
+                const offsetY = Math.max(-maxOffset, Math.min(maxOffset, reading.y * scale));
+                dot.style.transform = `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px))`;
+            }
+
+            checkForCircularMotion() {
+                this.isAnalyzing = true;
+
+                try {
+                    const result1 = this.detectByAngularMomentum();
+                    const result2 = this.detectByFrequency();
+                    const result3 = this.detectByPattern();
+
+                    const confidence = (result1.confidence * 0.4 + 
+                                     result2.confidence * 0.3 + 
+                                     result3.confidence * 0.3);
+
+                    // Update confidence bar
+                    document.getElementById('confidenceBar').style.width = `${confidence * 100}%`;
+                    document.getElementById('confidenceText').textContent = `Confidence: ${(confidence * 100).toFixed(1)}%`;
+
+                    // Check rate limiting
+                    const now = Date.now();
+                    const canDetect = (now - this.lastDetection) > this.rateLimitMs;
+
+                    if (confidence > 0.7 && canDetect) {
+                        this.onCircularMotionDetected(confidence);
+                        this.lastDetection = now;
+                    }
+                } finally {
+                    this.isAnalyzing = false;
+                }
+            }
+
+            detectByAngularMomentum() {
+                if (this.gyroBuffer.length < this.minCirclePoints) {
+                    return { detected: false, confidence: 0.0 };
+                }
+
+                const recent = this.gyroBuffer.slice(-50);
+                const magnitudes = recent.map(r => 
+                    Math.sqrt(r.x * r.x + r.y * r.y + r.z * r.z)
+                );
+
+                const avgMagnitude = magnitudes.reduce((a, b) => a + b) / magnitudes.length;
+                const variance = this.calculateVariance(magnitudes);
+
+                const magnitudeConsistency = 1.0 - Math.min(1.0, variance / 1000.0);
+                const magnitudeScore = this.scoreInRange(avgMagnitude, this.minCircularVelocity, this.maxCircularVelocity);
+
+                const confidence = magnitudeConsistency * 0.6 + magnitudeScore * 0.4;
+                return { detected: confidence > 0.5, confidence };
+            }
+
+            detectByFrequency() {
+                if (this.gyroBuffer.length < this.minCirclePoints) {
+                    return { detected: false, confidence: 0.0 };
+                }
+
+                const recent = this.gyroBuffer.slice(-50);
+                const xValues = recent.map(r => r.x);
+                const yValues = recent.map(r => r.y);
+                const zValues = recent.map(r => r.z);
+
+                const xCrossings = this.countZeroCrossings(xValues);
+                const yCrossings = this.countZeroCrossings(yValues);
+                const zCrossings = this.countZeroCrossings(zValues);
+
+                const avgCrossings = (xCrossings + yCrossings + zCrossings) / 3.0;
+                const periodicityScore = this.scoreInRange(avgCrossings, 2.0, 6.0);
+
+                return { detected: periodicityScore > 0.5, confidence: periodicityScore };
+            }
+
+            detectByPattern() {
+                if (this.gyroBuffer.length < this.minCirclePoints) {
+                    return { detected: false, confidence: 0.0 };
+                }
+
+                const recent = this.gyroBuffer.slice(-40);
+                const angles = recent.map(r => Math.atan2(r.y, r.x));
+                
+                const totalRotation = this.calculateTotalRotation(angles);
+                const completeness = Math.min(1.0, totalRotation / (2 * Math.PI));
+
+                if (completeness < this.completenessThreshold) {
+                    return { detected: false, confidence: 0.0 };
+                }
+
+                const smoothness = this.calculateRotationSmoothness(angles);
+                const confidence = completeness * 0.7 + smoothness * 0.3;
+
+                return { detected: confidence > 0.6, confidence };
+            }
+
+            calculateVariance(values) {
+                const mean = values.reduce((a, b) => a + b) / values.length;
+                const squaredDiffs = values.map(v => Math.pow(v - mean, 2));
+                return squaredDiffs.reduce((a, b) => a + b) / values.length;
+            }
+
+            scoreInRange(value, min, max) {
+                if (value < min) return Math.max(0.0, 1.0 - (min - value) / min);
+                if (value > max) return Math.max(0.0, 1.0 - (value - max) / max);
+                return 1.0;
+            }
+
+            countZeroCrossings(values) {
+                let crossings = 0;
+                for (let i = 1; i < values.length; i++) {
+                    if ((values[i-1] > 0) !== (values[i] > 0)) {
+                        crossings++;
+                    }
+                }
+                return crossings;
+            }
+
+            calculateTotalRotation(angles) {
+                let total = 0.0;
+                for (let i = 1; i < angles.length; i++) {
+                    let diff = angles[i] - angles[i-1];
+                    // Handle angle wrapping
+                    if (diff > Math.PI) diff -= 2 * Math.PI;
+                    if (diff < -Math.PI) diff += 2 * Math.PI;
+                    total += Math.abs(diff);
+                }
+                return total;
+            }
+
+            calculateRotationSmoothness(angles) {
+                if (angles.length < 3) return 0.0;
+
+                let totalCurvature = 0.0;
+                for (let i = 1; i < angles.length - 1; i++) {
+                    const curvature = Math.abs(angles[i+1] - 2*angles[i] + angles[i-1]);
+                    totalCurvature += curvature;
+                }
+
+                return Math.max(0.0, 1.0 - totalCurvature / angles.length);
+            }
+
+            onCircularMotionDetected(confidence) {
+                console.log(`🔄 Circular motion detected! Confidence: ${(confidence * 100).toFixed(1)}%`);
+                
+                // Visual feedback
+                document.body.style.background = 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)';
+                setTimeout(() => {
+                    document.body.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+                }, 1000);
+
+                // Vibration if available
+                if ('vibrate' in navigator) {
+                    navigator.vibrate([200, 100, 200]);
+                }
+
+                // Add to history
+                const historyItem = document.createElement('div');
+                historyItem.className = 'detection-item';
+                historyItem.textContent = `${new Date().toLocaleTimeString()}: Confidence ${(confidence * 100).toFixed(1)}%`;
+                document.getElementById('history').appendChild(historyItem);
+
+                // Update status
+                const status = document.getElementById('status');
+                status.textContent = `🎉 CIRCULAR MOTION DETECTED! (${(confidence * 100).toFixed(1)}%)`;
+                status.className = 'status detecting';
+                
+                setTimeout(() => {
+                    status.textContent = 'Listening for circular motions...';
+                    status.className = 'status active';
+                }, 2000);
+            }
+        }
+
+        const detector = new CircularMotionDetector();
+        let isDetectionActive = false;
+
+        // >>> ONLY CHANGE: permission flow (iOS uses DeviceMotion permission)
+        function startDetection() {
+            const needsPermission =
+                typeof DeviceMotionEvent !== 'undefined' &&
+                typeof DeviceMotionEvent.requestPermission === 'function';
+
+            if (needsPermission) {
+                DeviceMotionEvent.requestPermission()
+                    .then((permissionState) => {
+                        if (permissionState === 'granted') {
+                            startGyroscope();
+                        } else {
+                            alert('Motion permission denied. Please allow in browser settings.');
+                        }
+                    })
+                    .catch((err) => {
+                        console.error(err);
+                        alert('Permission request failed.');
+                    });
+            } else {
+                // Android/other browsers
+                startGyroscope();
+            }
+        }
+        // <<< ONLY CHANGE END
+
+        function startGyroscope() {
+            if (isDetectionActive) return;
+
+            window.addEventListener('devicemotion', handleMotion);
+            isDetectionActive = true;
+
+            document.getElementById('status').textContent = 'Listening for circular motions...';
+            document.getElementById('status').className = 'status active';
+            document.getElementById('startBtn').style.display = 'none';
+            document.getElementById('stopBtn').style.display = 'inline-block';
+
+            console.log('🚀 Circular motion detection started');
+        }
+
+        function stopDetection() {
+            if (!isDetectionActive) return;
+
+            window.removeEventListener('devicemotion', handleMotion);
+            isDetectionActive = false;
+
+            document.getElementById('status').textContent = 'Detection stopped';
+            document.getElementById('status').className = 'status inactive';
+            document.getElementById('startBtn').style.display = 'inline-block';
+            document.getElementById('stopBtn').style.display = 'none';
+
+            console.log('⏹️ Circular motion detection stopped');
+        }
+
+        function handleMotion(event) {
+            if (!isDetectionActive) return;
+
+            const rotationRate = event.rotationRate;
+            if (rotationRate) {
+                // rotationRate is in degrees/second
+                detector.addReading(
+                    rotationRate.alpha || 0, // Z-axis
+                    rotationRate.beta || 0,  // X-axis  
+                    rotationRate.gamma || 0  // Y-axis
+                );
+            }
+        }
+
+        function clearHistory() {
+            document.getElementById('history').innerHTML = '';
+            document.getElementById('confidenceBar').style.width = '0%';
+            document.getElementById('confidenceText').textContent = 'Confidence: 0%';
+        }
+
+        // Auto-start detection when page loads (for testing)
+        window.addEventListener('load', () => {
+            console.log('📱 Circular Motion Detection Web Tester Ready');
+            console.log('💡 Tip: Make circular motions with your phone to test detection');
+        });
+    </script>
+</body>
+</html>
