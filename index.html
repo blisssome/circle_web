@@ -190,29 +190,34 @@
         class CircularMotionDetector {
           constructor() {
             this.gyroBuffer = [];
-            this.bufferSize = 100;
+            this.bufferSize = 120;
       
+            // Motion scale
             this.minCircularVelocity = 30.0;   // deg/s
-            this.maxCircularVelocity = 800.0;  // quick wrist twists can exceed 200
+            this.maxCircularVelocity = 800.0;  // quick wrist twists can be high
       
-            this.minCirclePoints = 20;
+            this.minCirclePoints = 24;
             this.completenessThreshold = 0.7;
             this.isAnalyzing = false;
             this.lastDetection = 0;
             this.rateLimitMs = 3000;
       
-            // --- noise + UI smoothing ---
-            this.noiseFloor = 1.2;        // deg/s: treat smaller as sensor noise
+            // Noise + UI smoothing
+            this.noiseFloor = 1.5;     // deg/s: treat smaller as noise
             this.zeroEps   = this.noiseFloor;
+      
             this.uiX = 0; this.uiY = 0;
-            this.uiAlpha = 0.12;          // stronger smoothing for a calm dot
-            this.visualDeadzone = 1.0;    // deg/s after smoothing
-            this.uiScale = 1.2;           // reduce dot sensitivity
+            this.uiAlpha = 0.12;
+            this.visualDeadzone = 1.0;
+            this.uiScale = 1.2;
           }
       
           addReading(x, y, z) {
-            // x,y,z already in deg/s from event.rotationRate
-            const reading = { timestamp: Date.now(), x, y, z };
+            const now = Date.now();
+            const prev = this.gyroBuffer.length ? this.gyroBuffer[this.gyroBuffer.length - 1] : null;
+            const dt = prev ? Math.max(0.001, (now - prev.timestamp) / 1000) : 0.016; // seconds
+      
+            const reading = { timestamp: now, dt, x, y, z };
             this.gyroBuffer.push(reading);
             if (this.gyroBuffer.length > this.bufferSize) this.gyroBuffer.shift();
       
@@ -230,7 +235,7 @@
             const magnitude = Math.sqrt(reading.x**2 + reading.y**2 + reading.z**2);
             document.getElementById('magnitude').textContent = magnitude.toFixed(1);
       
-            // Smooth the dot, then apply a visual deadzone
+            // Smooth the dot (velocity indicator), then apply a visual deadzone
             this.uiX += this.uiAlpha * (reading.x - this.uiX);
             this.uiY += this.uiAlpha * (reading.y - this.uiY);
             const visX = Math.abs(this.uiX) < this.visualDeadzone ? 0 : this.uiX;
@@ -246,17 +251,23 @@
           checkForCircularMotion() {
             this.isAnalyzing = true;
             try {
-              const r1 = this.detectByAngularMomentum();
-              const r2 = this.detectByFrequency();
-              const r3 = this.detectByPattern();
+              const r1 = this.detectByAngularMomentum(); // magnitude + consistency (gated by activity)
+              const r2 = this.detectByFrequency();       // zero-crossings in axes
+              const r3 = this.detectByPattern();         // phase completeness in XY (plus direction coherence)
+              const r4 = this.detectZSpin();             // NEW: yaw spin (~full turn with steady sign)
       
-              const confidence = (r1.confidence * 0.4) + (r2.confidence * 0.3) + (r3.confidence * 0.3);
+              // Coherence gate: require either a stable 2D turning direction or a steady Z spin
+              const coherenceGate = Math.max(r3.coherence || 0, r4.coherence || 0);
+      
+              // Rebalance weights so "just moving around" doesn't trigger
+              const rawConfidence = (r1.confidence * 0.2) + (r2.confidence * 0.3) + (r3.confidence * 0.3) + (r4.confidence * 0.2);
+              const confidence = rawConfidence * (0.5 + 0.5 * coherenceGate); // damp when coherence is low
       
               document.getElementById('confidenceBar').style.width = `${confidence * 100}%`;
               document.getElementById('confidenceText').textContent = `Confidence: ${(confidence * 100).toFixed(1)}%`;
       
               const now = Date.now();
-              if (confidence > 0.7 && (now - this.lastDetection) > this.rateLimitMs) {
+              if (confidence > 0.75 && (now - this.lastDetection) > this.rateLimitMs) {
                 this.onCircularMotionDetected(confidence);
                 this.lastDetection = now;
               }
@@ -265,76 +276,106 @@
             }
           }
       
-          detectByAngularMomentum() {
-            if (this.gyroBuffer.length < this.minCirclePoints) {
-              return { detected: false, confidence: 0.0 };
-            }
-            const recent = this.gyroBuffer.slice(-50);
-            const mags = recent.map(r => Math.sqrt(r.x*r.x + r.y*r.y + r.z*r.z));
+          // ---- Detectors ----
       
-            const avgMag = mags.reduce((a,b)=>a+b,0) / mags.length;
-            const variance = this.calculateVariance(mags);
+          detectByAngularMomentum() {
+            const recent = this._recent(60);
+            if (recent.length < this.minCirclePoints) return { detected: false, confidence: 0.0 };
+      
+            const mags = recent.map(r => Math.sqrt(r.x*r.x + r.y*r.y + r.z*r.z));
+            const avgMag = this._mean(mags);
+            const variance = this._variance(mags);
       
             const magnitudeConsistency = 1.0 - Math.min(1.0, variance / 1000.0);
-            const magnitudeScore = this.scoreInRange(avgMag, this.minCircularVelocity, this.maxCircularVelocity);
+            const magnitudeScore = this._scoreInRange(avgMag, this.minCircularVelocity, this.maxCircularVelocity);
       
-            // >>> key change: suppress "good consistency" when there is no motion
-            const activity = this.scoreInRange(avgMag, this.noiseFloor * 2, this.maxCircularVelocity);
+            // Gate by actual activity so idle "nice variance" doesn't look good
+            const activity = this._scoreInRange(avgMag, this.noiseFloor * 2, this.maxCircularVelocity);
             const confidence = activity * (magnitudeConsistency * 0.6 + magnitudeScore * 0.4);
-            // <<<
-      
             return { detected: confidence > 0.5, confidence };
           }
       
           detectByFrequency() {
-            if (this.gyroBuffer.length < this.minCirclePoints) {
-              return { detected: false, confidence: 0.0 };
-            }
-            const recent = this.gyroBuffer.slice(-50);
+            const recent = this._recent(60);
+            if (recent.length < this.minCirclePoints) return { detected: false, confidence: 0.0 };
+      
             const xValues = recent.map(r => this._deadzone(r.x));
             const yValues = recent.map(r => this._deadzone(r.y));
             const zValues = recent.map(r => this._deadzone(r.z));
       
-            const xCross = this.countZeroCrossings(xValues);
-            const yCross = this.countZeroCrossings(yValues);
-            const zCross = this.countZeroCrossings(zValues);
+            const xCross = this._zeroCrossings(xValues);
+            const yCross = this._zeroCrossings(yValues);
+            const zCross = this._zeroCrossings(zValues);
       
             const avgCrossings = (xCross + yCross + zCross) / 3.0;
-            const periodicityScore = this.scoreInRange(avgCrossings, 2.0, 6.0);
+            const periodicityScore = this._scoreInRange(avgCrossings, 2.0, 6.0);
             return { detected: periodicityScore > 0.5, confidence: periodicityScore };
           }
       
           detectByPattern() {
-            if (this.gyroBuffer.length < this.minCirclePoints) {
-              return { detected: false, confidence: 0.0 };
-            }
-            const recent = this.gyroBuffer.slice(-40);
+            const recent = this._recent(50);
+            if (recent.length < this.minCirclePoints) return { detected: false, confidence: 0.0, coherence: 0.0 };
+      
+            // Phase in XY angular-velocity plane (wrist circles usually rotate X/Y together)
             const angles = recent.map(r => Math.atan2(r.y, r.x));
-      
-            const totalRotation = this.calculateTotalRotation(angles);
+            const totalRotation = this._totalRotation(angles);
             const completeness = Math.min(1.0, totalRotation / (2 * Math.PI));
-            if (completeness < this.completenessThreshold) return { detected: false, confidence: 0.0 };
+            if (completeness < this.completenessThreshold) return { detected: false, confidence: 0.0, coherence: 0.0 };
       
-            const smoothness = this.calculateRotationSmoothness(angles);
-            const confidence = completeness * 0.7 + smoothness * 0.3;
-            return { detected: confidence > 0.6, confidence };
+            // NEW: direction coherence — is the phase mostly progressing in one direction?
+            const dir = this._directionCoherence(angles);
+            const smoothness = this._rotationSmoothness(angles);
+            const confidence = completeness * 0.6 + smoothness * 0.2 + dir * 0.2;
+      
+            return { detected: confidence > 0.6, confidence, coherence: dir };
           }
       
+          // Detect a Z-axis spin (yaw), integrating |z| over time and checking sign consistency
+          detectZSpin() {
+            const recent = this._recent(70);
+            if (recent.length < this.minCirclePoints) return { detected: false, confidence: 0.0, coherence: 0.0 };
+      
+            // Cumulative absolute angle in degrees
+            let cum = 0;
+            let signConsistent = 0, steps = 0;
+            for (let i = 1; i < recent.length; i++) {
+              const zPrev = this._deadzone(recent[i-1].z);
+              const zCurr = this._deadzone(recent[i].z);
+              const dt = recent[i].dt;
+              cum += Math.abs(zCurr) * dt; // deg
+      
+              if (Math.abs(zPrev) > this.zeroEps && Math.abs(zCurr) > this.zeroEps) {
+                const sameSign = (zPrev > 0 && zCurr > 0) || (zPrev < 0 && zCurr < 0);
+                if (sameSign) signConsistent++;
+                steps++;
+              }
+            }
+            const completeness = Math.min(1.0, cum / 360.0); // how close to a full turn
+            const signCoherence = steps ? (signConsistent / steps) : 0.0;
+      
+            const avgAbsZ = this._mean(recent.map(r => Math.abs(r.z)));
+            const magScore = this._scoreInRange(avgAbsZ, this.minCircularVelocity, this.maxCircularVelocity);
+      
+            const confidence = 0.5 * completeness + 0.3 * signCoherence + 0.2 * magScore;
+            return { detected: confidence > 0.6, confidence, coherence: signCoherence };
+          }
+      
+          // ---- Helpers ----
+          _recent(n) { return this.gyroBuffer.slice(-n); }
           _deadzone(v) { return Math.abs(v) < this.noiseFloor ? 0 : v; }
-      
-          calculateVariance(values) {
-            const mean = values.reduce((a,b)=>a+b,0) / values.length;
-            const sq = values.map(v => (v - mean) * (v - mean));
-            return sq.reduce((a,b)=>a+b,0) / values.length;
+          _mean(a) { return a.length ? a.reduce((x,y)=>x+y,0)/a.length : 0; }
+          _variance(values) {
+            if (!values.length) return 0;
+            const m = this._mean(values);
+            const sq = values.map(v => (v - m) * (v - m));
+            return this._mean(sq);
           }
-      
-          scoreInRange(value, min, max) {
+          _scoreInRange(value, min, max) {
             if (value < min) return Math.max(0.0, 1.0 - (min - value) / (min || 1));
             if (value > max) return Math.max(0.0, 1.0 - (value - max) / (max || 1));
             return 1.0;
           }
-      
-          countZeroCrossings(values) {
+          _zeroCrossings(values) {
             let crossings = 0;
             for (let i = 1; i < values.length; i++) {
               const a = values[i-1], b = values[i];
@@ -342,8 +383,7 @@
             }
             return crossings;
           }
-      
-          calculateTotalRotation(angles) {
+          _totalRotation(angles) {
             let total = 0;
             for (let i = 1; i < angles.length; i++) {
               let d = angles[i] - angles[i-1];
@@ -353,8 +393,7 @@
             }
             return total;
           }
-      
-          calculateRotationSmoothness(angles) {
+          _rotationSmoothness(angles) {
             if (angles.length < 3) return 0.0;
             let totalCurv = 0;
             for (let i = 1; i < angles.length - 1; i++) {
@@ -362,13 +401,27 @@
             }
             return Math.max(0.0, 1.0 - totalCurv / angles.length);
           }
+          _directionCoherence(angles) {
+            if (angles.length < 2) return 0.0;
+            let pos = 0, neg = 0, valid = 0;
+            for (let i = 1; i < angles.length; i++) {
+              let d = angles[i] - angles[i-1];
+              if (d >  Math.PI) d -= 2*Math.PI;
+              if (d < -Math.PI) d += 2*Math.PI;
+              if (Math.abs(d) < 1e-3) continue;
+              valid++;
+              if (d > 0) pos++; else neg++;
+            }
+            if (!valid) return 0.0;
+            const dominant = Math.max(pos, neg) / valid;
+            // Map [0.5..1] -> [0..1] (random walk -> 0, steady turn -> 1)
+            return Math.max(0, (dominant - 0.5) * 2);
+          }
       
           onCircularMotionDetected(confidence) {
             console.log(`🔄 Circular motion detected! Confidence: ${(confidence * 100).toFixed(1)}%`);
             document.body.style.background = 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)';
-            setTimeout(() => {
-              document.body.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-            }, 1000);
+            setTimeout(() => { document.body.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'; }, 1000);
             if ('vibrate' in navigator) navigator.vibrate([200, 100, 200]);
       
             const historyItem = document.createElement('div');
@@ -430,11 +483,10 @@
           if (!isDetectionActive) return;
           const rr = event.rotationRate;
           if (rr) {
-            // Correct axes; keep degrees/sec (no extra conversion)
             detector.addReading(
               rr.beta  || 0, // X
               rr.gamma || 0, // Y
-              rr.alpha || 0  // Z
+              rr.alpha || 0  // Z (yaw)
             );
           }
         }
@@ -446,7 +498,7 @@
         }
       
         window.addEventListener('load', () => {
-          console.log('📱 Ready. Idle confidence should hover near 0–5%, dot barely moves.');
+          console.log('📱 Tip: For a positive detection, actually rotate the phone (spin your wrist). Simply moving in a circle without rotating won’t produce gyro “circles”.');
         });
       </script>
       
