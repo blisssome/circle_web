@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Rapid Wrist/Elbow Circle — Accel-Angle Bandpass (No Prompts)</title>
+<title>Rapid Wrist Circle — Noise-Hardened (No Prompts)</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{
@@ -49,9 +49,9 @@
 </head>
 <body>
   <div class="container">
-    <h1>🔄 Rapid Wrist/Elbow Circle (No Prompts)</h1>
+    <h1>🔄 Rapid Wrist Circle — Noise-Hardened</h1>
 
-    <div id="status" class="status">Tap “Start”, hold still 1s, then do ONE quick circle</div>
+    <div id="status" class="status">Tap “Start”, hold still 1s, then do ONE quick wrist circle</div>
 
     <div class="visual">
       <canvas id="pathCanvas"></canvas>
@@ -68,9 +68,9 @@
     </div>
 
     <div class="data-display">
-      <div>|a⟂g| bandpass (m/s²): <span id="aBP">0.00</span></div>
+      <div>a⟂g bandpass (m/s²): <span id="aBP">0.00</span></div>
       <div>φ̇ (deg/s): <span id="omegaPhi">0</span></div>
-      <div>coherence: <span id="coh">0.00</span></div>
+      <div>yaw gyro (deg/s): <span id="yaw">0</span></div>
       <div>valid%: <span id="vfrac">0%</span></div>
     </div>
 
@@ -87,7 +87,7 @@
   </div>
 
 <script>
-/* ------------- No-permission version ------------- */
+/* ================= Core ================= */
 const TAU = Math.PI*2, DEG = Math.PI/180;
 const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
 const unwrap=d=>(d>Math.PI?d-TAU:d<-Math.PI?d+TAU:d);
@@ -97,51 +97,76 @@ function norm(v){const n=hypot3(v.x,v.y,v.z)||1;return {x:v.x/n,y:v.y/n,z:v.z/n}
 function median(a){if(!a.length)return 0;const s=[...a].sort((x,y)=>x-y);const m=Math.floor(s.length/2);return s.length%2?s[m]:(s[m-1]+s[m])/2;}
 function mad(a,m=null){if(!a.length)return 0;if(m==null)m=median(a);const d=a.map(x=>Math.abs(x-m));return median(d);}
 
-class RapidCircleDetector {
+class RapidCircleHardened {
   constructor(canvas,dot){
-    /* ---- tuned for “one quick circle” ---- */
-    this.progressTarget = TAU * 0.90;   // need ~324° of rotation
-    this.segMinDur = 0.15;              // super fast allowed
-    this.segMaxDur = 2.20;              // must be “rapid”
-    this.gapMsAllow = 180;              // short drop tolerance
+    // ----- Targets & windows -----
+    this.progressTarget = TAU*0.90;   // ~324°
+    this.segMinDur = 0.15;            // very fast allowed
+    this.segMaxDur = 2.20;            // must be rapid
+    this.gapMsAllow = 150;            // short drop tolerance
 
-    // band-pass for accel in plane: ~0.5–6 Hz
-    this.hpTau = 0.28;                  // ~0.57 Hz
-    this.lpTau = 0.06;                  // ~2.6 Hz (keeps it snappy)
+    // Band-pass accel (~0.6–6 Hz)
+    this.hpTau = 0.25;                // HP ~0.64 Hz
+    this.lpTau = 0.06;                // LP ~2.6 Hz (snappy)
 
-    // gating
-    this.aBPmin = 0.45;                 // m/s² min bandpassed magnitude to count
-    this.omegaPhiMin = 1.3;             // rad/s (~75°/s) turning speed floor
-    this.omegaPhiOff = 1.0;             // hysteresis
+    // Direction smoothing on unit vector (stabilizes angle)
+    this.dirTau = 0.08;               // ~80 ms
 
-    // directional consistency
-    this.cohTau = 0.6;                  // EWMA window ~0.6s
-    this.cohMin = 0.65;                 // mostly one way
+    // Minimums (auto-calibrated, then clamped)
+    this.aBPmin = 0.45;               // m/s² (bandpass)
+    this.omegaPhiMin = 1.3;           // rad/s (~75°/s)
+    this.omegaPhiOff = 1.0;
 
-    // segment-level validity requirements
-    this.minValidFrac = 0.55;           // ≥55% of samples “valid”
-    this.minAvgABP    = 0.55;           // average bandpass amplitude over segment
+    // Segment quality
+    this.minValidFrac = 0.60;         // ≥60% valid samples
+    this.minAvgABP    = 0.60;         // average bandpassed accel
+    this.minPlanarRMS = 0.30;         // RMS of raw planar accel (reject spin-only)
 
-    // canvas & UI
+    // Spin-in-place veto (gyro)
+    this.yawVetoDeg   = 80;           // deg/s about gravity
+    this.gyroMagVeto  = 180;          // total deg/s if linear motion weak
+
+    // Signed accumulation
+    this.signTau = 0.15;              // ~150 ms EWMA to decide direction
+    this.flipResetMs = 120;           // if sign flips and persists, reset
+
+    // UI / canvas
     this.canvas=canvas; this.ctx=canvas.getContext('2d'); this.dot=dot;
     this.dpr=Math.max(1,window.devicePixelRatio||1);
     this.uiAlpha=0.25; this._uiX=0; this._uiY=0;
 
-    // state
+    // State
     this.lastT=0; this.g=null;
-    this.uPrev=0; this.vPrev=0;         // for HP filter
-    this.uHP=0; this.vHP=0;             // high-pass state
-    this.uBP=0; this.vBP=0;             // low-pass (bandpass output)
 
-    this.prevPhi=null; this.turnAbs=0; this.progress=0;
+    // plane bases
+    this.e1={x:1,y:0,z:0}; this.e2={x:0,y:1,z:0};
+
+    // band-pass states
+    this.uPrev=0; this.vPrev=0;   // for HP
+    this.uHP=0; this.vHP=0;
+    this.uBP=0; this.vBP=0;
+
+    // unit direction smoothing
+    this.udX=1; this.udY=0;       // smoothed unit vector
+
+    // angle stuff
+    this.prevPhi=null;            // angle of smoothed unit vector
+    this.turnSigned=0;            // accumulate only chosen sign
+    this.progress=0;
     this.segStart=null; this.lastGoodMs=0;
-    this.posEW=0; this.negEW=0;
 
-    // segment stats
+    // quality stats
     this.validCount=0; this.totalCount=0; this.sumABP=0;
+    this.sqSumPlanar=0;
 
-    // calibration (noise floors) — 1s
-    this.calibrating=true; this.calibStart=performance.now(); this.calA=[]; this.calPhiDot=[];
+    // direction decision
+    this.signEW=0; this.currentSign=0; this.flipStart=0;
+
+    // gyro
+    this.yawDeg=0; this.gyroMag=0;
+
+    // calibration
+    this.calibrating=true; this.calStart=performance.now(); this.cA=[]; this.cW=[];
     this._setupCanvas();
   }
 
@@ -160,28 +185,29 @@ class RapidCircleDetector {
     this._resetCanvas();
     window.addEventListener('resize',()=>this._setupCanvas(),{passive:true});
   }
+
   _resetCanvas(){
     this.ctx.clearRect(0,0,this.w,this.h);
     this.ctx.save(); this.ctx.globalAlpha=.18;
     this.ctx.beginPath(); this.ctx.arc(this.cx,this.cy,this.R,0,TAU); this.ctx.stroke(); this.ctx.restore();
-    this.ctx.save(); this.ctx.beginPath(); this.ctx.arc(this.cx,this.cy,this.R - this.ctx.lineWidth*0.5,0,TAU); this.ctx.clip();
+    this.ctx.save(); this.ctx.beginPath(); this.ctx.arc(this.cx,this.cy,this.R-this.ctx.lineWidth*0.5,0,TAU); this.ctx.clip();
     this.pathStarted=false;
 
-    this.prevPhi=null; this.turnAbs=0; this.progress=0;
+    this.prevPhi=null; this.turnSigned=0; this.progress=0;
     this.segStart=null; this.lastGoodMs=0;
-    this.posEW=this.negEW=0;
-    this.validCount=this.totalCount=this.sumABP=0;
+    this.validCount=this.totalCount=this.sumABP=0; this.sqSumPlanar=0;
+    this.signEW=0; this.currentSign=0; this.flipStart=0;
 
     this._lastXPix=this.cx; this._lastYPix=this.cy;
     this._renderProgress(); this._moveDot();
   }
 
-  addSample(acc,accG){
+  addSample(acc,accG,rr){
     const now=performance.now();
     const dt=this.lastT?Math.max(0.001,(now-this.lastT)/1000):0.016;
     this.lastT=now;
 
-    // gravity estimate (LPF on incl. gravity)
+    // ----- Gravity estimate -----
     if(!this.g){
       if(accG && Number.isFinite(accG.x)) this.g={x:accG.x,y:accG.y,z:accG.z};
       else if(acc && Number.isFinite(acc.x)){ const m=hypot3(acc.x,acc.y,acc.z); if(m>7.5) this.g={x:acc.x,y:acc.y,z:acc.z}; else return; }
@@ -192,97 +218,134 @@ class RapidCircleDetector {
         this.g.x=a*this.g.x+(1-a)*accG.x; this.g.y=a*this.g.y+(1-a)*accG.y; this.g.z=a*this.g.z+(1-a)*accG.z;
       }
     }
+    const gn=norm(this.g);
+    const ref=Math.abs(gn.z)<0.9?{x:0,y:0,z:1}:{x:1,y:0,z:0};
+    this.e1 = norm(cross(gn,ref));
+    this.e2 = cross(gn,this.e1);
 
-    // linear accel (remove gravity) → plane ⟂ g
+    // ----- Linear accel → plane -----
     let ax=0,ay=0,az=0;
     if(acc && Number.isFinite(acc.x)){ ax=acc.x; ay=acc.y; az=acc.z; }
     else if(accG){ ax=accG.x-this.g.x; ay=accG.y-this.g.y; az=accG.z-this.g.z; }
 
-    const gn=norm(this.g);
-    const ref=Math.abs(gn.z)<0.9?{x:0,y:0,z:1}:{x:1,y:0,z:0};
-    const e1=norm(cross(gn,ref)), e2=cross(gn,e1);
-
     const dotg=ax*gn.x+ay*gn.y+az*gn.z;
     const px=ax-dotg*gn.x, py=ay-dotg*gn.y, pz=az-dotg*gn.z;
+    let u=px*this.e1.x+py*this.e1.y+pz*this.e1.z;
+    let v=px*this.e2.x+py*this.e2.y+pz*this.e2.z;
+    const planarMag = Math.hypot(u,v);
 
-    let u=px*e1.x+py*e1.y+pz*e1.z;
-    let v=px*e2.x+py*e2.y+pz*e2.z;
-
-    // -------- band-pass (HP then LP) --------
-    // High-pass: y = α*(y + x - x_prev), α = τ/(τ+dt)
+    // ----- Band-pass (HP then LP) -----
     const aHP = this.hpTau/(this.hpTau+dt);
     this.uHP = aHP*(this.uHP + u - this.uPrev);
     this.vHP = aHP*(this.vHP + v - this.vPrev);
     this.uPrev = u; this.vPrev = v;
 
-    // Low-pass on HP output: y = exp(-dt/τ)*y + (1-exp(-dt/τ))*x
     const aLP = Math.exp(-dt/this.lpTau);
     this.uBP = aLP*this.uBP + (1-aLP)*this.uHP;
     this.vBP = aLP*this.vBP + (1-aLP)*this.vHP;
 
     const aBPmag = Math.hypot(this.uBP,this.vBP);
 
-    // angle of band-passed acceleration (centripetal direction)
-    const phi = Math.atan2(this.vBP, this.uBP);
+    // ----- Smoothed unit direction (stabilizes φ) -----
+    let ux = aBPmag>1e-6 ? this.uBP/aBPmag : this.udX;
+    let uy = aBPmag>1e-6 ? this.vBP/aBPmag : this.udY;
+    const dA = Math.exp(-dt/this.dirTau);
+    this.udX = dA*this.udX + (1-dA)*ux;
+    this.udY = dA*this.udY + (1-dA)*uy;
+    const nrm = Math.hypot(this.udX,this.udY)||1;
+    this.udX/=nrm; this.udY/=nrm;
+
+    const phi = Math.atan2(this.udY,this.udX);
     if(this.prevPhi==null) this.prevPhi=phi;
     const dphi = unwrap(phi - this.prevPhi);
     this.prevPhi = phi;
+    const phiDot = Math.abs(dphi)/dt;
 
-    const phiDot = Math.abs(dphi)/dt; // rad/s
+    // ----- Gyro spin-in-place veto -----
+    if (rr){
+      // project gyro (deg/s) onto gravity axis to get yaw about g
+      this.yawDeg = (rr.beta||0)*gn.x + (rr.gamma||0)*gn.y + (rr.alpha||0)*gn.z;
+      this.gyroMag = Math.hypot(rr.alpha||0, rr.beta||0, rr.gamma||0);
+    } else {
+      this.yawDeg = 0; this.gyroMag = 0;
+    }
+    const spinBlocked = (Math.abs(this.yawDeg) > this.yawVetoDeg) ||
+                        (this.gyroMag > this.gyroMagVeto && aBPmag < 0.8);
 
-    // draw on fixed ring (clean)
+    // ----- Draw angle on fixed ring -----
     const x=this.cx + this.rDraw*Math.cos(phi);
     const y=this.cy + this.rDraw*Math.sin(phi);
     if(!this.pathStarted){ this.ctx.beginPath(); this.ctx.moveTo(x,y); this.pathStarted=true; }
     else { this.ctx.lineTo(x,y); this.ctx.stroke(); }
     this._lastXPix=x; this._lastYPix=y; this._moveDot();
 
-    // calibration (1s): set floors gently above noise, then go
+    // ----- Calibration: get noise floors -----
     if(this.calibrating){
-      this.calA.push(aBPmag); this.calPhiDot.push(phiDot);
-      if(now - this.calibStart > 1000){
-        const aMed=median(this.calA), aMAD=mad(this.calA,aMed)*1.4826;
-        const wMed=median(this.calPhiDot), wMAD=mad(this.calPhiDot,wMed)*1.4826;
-        this.aBPmin = Math.min(0.70, Math.max(0.35, aMed + 6*aMAD));
-        this.omegaPhiMin = Math.min(2.2, Math.max(1.0, wMed + 5*wMAD));  // demand *rapid* turning
+      this.cA.push(aBPmag); this.cW.push(phiDot);
+      if(now - this.calStart > 1000){
+        const aMed=median(this.cA), aMAD=mad(this.cA,aMed)*1.4826;
+        const wMed=median(this.cW), wMAD=mad(this.cW,wMed)*1.4826;
+        this.aBPmin = Math.min(0.80, Math.max(0.40, aMed + 6*aMAD));
+        this.omegaPhiMin = Math.min(2.2, Math.max(1.0, wMed + 5*wMAD));
         this.omegaPhiOff = Math.max(0.8, this.omegaPhiMin*0.75);
         this.calibrating=false;
-        const st=document.getElementById('status'); if(st){st.textContent='Listening… do ONE quick circle'; st.className='status active';}
+        const st=document.getElementById('status'); if(st){st.textContent='Listening… one quick wrist circle'; st.className='status active';}
       }
-      this._hud(aBPmag, phiDot, 0.5, 0);
+      this._hud(aBPmag, phiDot, this.yawDeg, 0);
       return;
     }
 
-    // validity & coherence
+    // ----- Validity gating -----
     const enoughSpeed = phiDot >= (this.segStart?this.omegaPhiOff:this.omegaPhiMin);
-    const valid = (aBPmag >= this.aBPmin) && enoughSpeed;
+    const valid = !spinBlocked && (aBPmag >= this.aBPmin) && enoughSpeed;
 
-    // coherence EWMA (directional consistency)
-    const cDecay = Math.exp(-dt/this.cohTau);
-    this.posEW = cDecay*this.posEW + Math.max(0, dphi);
-    this.negEW = cDecay*this.negEW + Math.max(0,-dphi);
-    const coh = (this.posEW+this.negEW)>1e-6 ? Math.max(this.posEW,this.negEW)/(this.posEW+this.negEW) : 0.5;
-
-    // segment logic
+    // Segment stats
     this.totalCount++;
-    if(valid) this.validCount++, this.sumABP += aBPmag;
+    if(valid){ this.validCount++; this.sumABP += aBPmag; }
+    this.sqSumPlanar += planarMag*planarMag;
 
-    if(valid && coh >= this.cohMin){
-      if(!this.segStart){ this.segStart=now; this.turnAbs=0; this.validCount=1; this.totalCount=1; this.sumABP=aBPmag; this.posEW=this.negEW=0; }
-      this.turnAbs += Math.abs(dphi);
+    // ----- Signed accumulation with flip reset -----
+    // EW sign decision
+    const sDecay = Math.exp(-dt/this.signTau);
+    this.signEW = sDecay*this.signEW + (1-sDecay)*(dphi);
+    const wantSign = Math.sign(this.signEW)||this.currentSign||1;
+
+    if(valid){
+      // if sign flips and persists, reset segment (kill shakes)
+      if(this.currentSign && Math.sign(dphi) && Math.sign(dphi)!==this.currentSign){
+        this.flipStart = this.flipStart || now;
+        if(now - this.flipStart > this.flipResetMs){
+          this._resetSegment(); // start fresh with new direction
+        }
+      } else {
+        this.flipStart = 0;
+      }
+
+      // start segment if needed
+      if(!this.segStart){
+        this.segStart=now; this.turnSigned=0; this.validCount=1; this.totalCount=1; this.sumABP=aBPmag; this.sqSumPlanar=planarMag*planarMag;
+        this.currentSign = wantSign || 1;
+      } else {
+        this.currentSign = wantSign || this.currentSign || 1;
+      }
+
+      // only accumulate same-sign rotation; opposite sign does NOT add
+      const inc = this.currentSign * dphi;
+      if(inc > 0) this.turnSigned += inc;
 
       const prevProg=this.progress;
-      this.progress = Math.min(1, this.turnAbs / this.progressTarget);
+      this.progress = Math.min(1, this.turnSigned / this.progressTarget);
       this._renderProgress();
 
       if(prevProg<1 && this.progress>=1){
         const dur=(now - this.segStart)/1000;
         const vfrac = this.validCount/Math.max(1,this.totalCount);
         const avgA  = this.sumABP/Math.max(1,this.validCount);
-        const cooled = true; // very short cooldown not necessary for single-turn
+        const planarRMS = Math.sqrt(this.sqSumPlanar/Math.max(1,this.totalCount));
+
         if(dur>=this.segMinDur && dur<=this.segMaxDur &&
            vfrac>=this.minValidFrac && avgA>=this.minAvgABP &&
-           coh>=this.cohMin && cooled){
+           planarRMS>=this.minPlanarRMS && !spinBlocked){
           this._onDetected();
           this._resetSegment();
         }
@@ -291,18 +354,22 @@ class RapidCircleDetector {
     } else {
       if(this.segStart){
         if(!this.lastGoodMs) this.lastGoodMs=now;
-        if((now - this.lastGoodMs) > this.gapMsAllow){ this._resetSegment(); this.lastGoodMs=0; }
-        this.progress = Math.max(0, this.progress - 0.02);
-        this._renderProgress();
+        if(now - this.lastGoodMs > this.gapMsAllow){
+          this._resetSegment(); this.lastGoodMs=0;
+        }
       }
+      this.progress=Math.max(0, this.progress - 0.02);
+      this._renderProgress();
     }
 
-    this._hud(aBPmag, phiDot, coh, (this.validCount/Math.max(1,this.totalCount)));
+    // HUD
+    this._hud(aBPmag, phiDot, this.yawDeg, (this.validCount/Math.max(1,this.totalCount)));
   }
 
   _resetSegment(){
-    this.segStart=null; this.turnAbs=0; this.progress=0;
-    this.validCount=0; this.totalCount=0; this.sumABP=0;
+    this.segStart=null; this.turnSigned=0; this.progress=0;
+    this.validCount=0; this.totalCount=0; this.sumABP=0; this.sqSumPlanar=0;
+    this.currentSign=0; this.signEW=0; this.flipStart=0;
     this._renderProgress();
   }
 
@@ -313,26 +380,29 @@ class RapidCircleDetector {
     if(bar) bar.style.width=pct+'%';
     if(txt) txt.textContent=`Revolution progress: ${pct}%`;
   }
+
   _moveDot(){
     const x=(this._lastXPix??this.cx), y=(this._lastYPix??this.cy);
     const cssW=this.canvas.clientWidth, cssH=this.canvas.clientHeight;
     const cssX=(x/this.dpr)-cssW/2, cssY=(y/this.dpr)-cssH/2;
-    this._uiX+=0.25*(cssX-this._uiX);
-    this._uiY+=0.25*(cssY-this._uiY);
+    this._uiX+=this.uiAlpha*(cssX-this._uiX);
+    this._uiY+=this.uiAlpha*(cssY-this._uiY);
     this.dot.style.transform=`translate(calc(-50% + ${this._uiX}px), calc(-50% + ${this._uiY}px))`;
   }
-  _hud(aBP,phiDot,coh,vfrac){
+
+  _hud(aBP,phiDot,yaw,vfrac){
     const a=document.getElementById('aBP'); if(a) a.textContent=aBP.toFixed(2);
     const w=document.getElementById('omegaPhi'); if(w) w.textContent=((phiDot/DEG)|0);
-    const c=document.getElementById('coh'); if(c) c.textContent=coh.toFixed(2);
+    const y=document.getElementById('yaw'); if(y) y.textContent=(yaw|0);
     const vf=document.getElementById('vfrac'); if(vf) vf.textContent=Math.round(vfrac*100)+'%';
   }
+
   _onDetected(){
     document.body.style.background='linear-gradient(135deg,#4CAF50 0%,#45a049 100%)';
     setTimeout(()=>{document.body.style.background='linear-gradient(135deg,#667eea 0%,#764ba2 100%)';},600);
     const s=document.getElementById('status');
-    if(s){ s.textContent='🎉 1 rapid revolution'; s.className='status detecting';
-      setTimeout(()=>{ s.textContent='Listening… do ONE quick circle'; s.className='status active'; },1200); }
+    if(s){ s.textContent='🎉 Rapid wrist circle'; s.className='status detecting';
+      setTimeout(()=>{ s.textContent='Listening… one quick wrist circle'; s.className='status active'; },1200); }
     const h=document.getElementById('history');
     if(h){ const div=document.createElement('div'); div.className='detection-item';
       div.textContent=new Date().toLocaleTimeString()+': Rapid circle detected'; h.appendChild(div); }
@@ -340,11 +410,12 @@ class RapidCircleDetector {
   }
 }
 
-/* -------- wiring (no permission prompts) -------- */
+/* ============== Wiring (no permission prompts) ============== */
 let det=null,isActive=false,probeTimer=null;
+
 function startDetection(){
   if(isActive) return;
-  det=new RapidCircleDetector(document.getElementById('pathCanvas'),document.getElementById('gyroDot'));
+  det=new RapidCircleHardened(document.getElementById('pathCanvas'),document.getElementById('gyroDot'));
   window.addEventListener('devicemotion', onMotion, {passive:true});
   isActive=true;
   const st=document.getElementById('status'); if(st){st.textContent='Calibrating… hold still 1s'; st.className='status';}
@@ -352,8 +423,7 @@ function startDetection(){
   document.getElementById('stopBtn').style.display='inline-block';
 
   // probe: show inline tip if no events in 2s
-  let got=false;
-  const probe=()=>{got=true;window.removeEventListener('devicemotion',probe);};
+  let got=false; const probe=()=>{got=true;window.removeEventListener('devicemotion',probe);};
   window.addEventListener('devicemotion',probe,{passive:true});
   clearTimeout(probeTimer);
   probeTimer=setTimeout(()=>{ if(!got) document.getElementById('sensorNotice').style.display='block'; },2000);
@@ -362,12 +432,17 @@ function stopDetection(){
   if(!isActive) return;
   window.removeEventListener('devicemotion', onMotion);
   isActive=false;
-  const st=document.getElementById('status'); if(st){st.textContent='Detection stopped'; st.className='status';}
+  const st=document.getElementById('status');
+  if(st){st.textContent='Detection stopped'; st.className='status';}
   document.getElementById('startBtn').style.display='inline-block';
   document.getElementById('stopBtn').style.display='none';
 }
 function onMotion(e){
-  det.addSample(e.acceleration || null, e.accelerationIncludingGravity || null);
+  det.addSample(
+    e.acceleration || null,
+    e.accelerationIncludingGravity || null,
+    e.rotationRate || null
+  );
 }
 function clearHistory(){
   const h=document.getElementById('history'); if(h) h.innerHTML='';
