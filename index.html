@@ -192,84 +192,71 @@
             this.gyroBuffer = [];
             this.bufferSize = 100;
       
-            // PARAMS (unchanged intent, but a safer ceiling for real spins)
-            this.minCircularVelocity = 30.0;     // deg/s
-            this.maxCircularVelocity = 800.0;    // was 200. Many phones report >200 deg/s on quick twists.
+            this.minCircularVelocity = 30.0;   // deg/s
+            this.maxCircularVelocity = 800.0;  // quick wrist twists can exceed 200
       
             this.minCirclePoints = 20;
             this.completenessThreshold = 0.7;
             this.isAnalyzing = false;
             this.lastDetection = 0;
-            this.rateLimitMs = 3000; // 3 seconds
+            this.rateLimitMs = 3000;
       
-            // --- UI-only smoothing (doesn't touch detection) ---
-            this.uiX = 0;  // smoothed X for the green dot
-            this.uiY = 0;  // smoothed Y for the green dot
-            this.uiAlpha = 0.25; // smoothing factor (0..1). Increase for smoother/slower dot.
-            
-            // --- Tiny deadzone to ignore tiny jitter in zero-crossing count (helps idle confidence) ---
-            this.zeroEps = 0.8; // deg/s. Values with |v| < zeroEps are treated as 0 in crossing counts.
+            // --- noise + UI smoothing ---
+            this.noiseFloor = 1.2;        // deg/s: treat smaller as sensor noise
+            this.zeroEps   = this.noiseFloor;
+            this.uiX = 0; this.uiY = 0;
+            this.uiAlpha = 0.12;          // stronger smoothing for a calm dot
+            this.visualDeadzone = 1.0;    // deg/s after smoothing
+            this.uiScale = 1.2;           // reduce dot sensitivity
           }
       
           addReading(x, y, z) {
-            // x,y,z are already in degrees/sec from event.rotationRate
-            const reading = {
-              timestamp: Date.now(),
-              x, y, z
-            };
-      
+            // x,y,z already in deg/s from event.rotationRate
+            const reading = { timestamp: Date.now(), x, y, z };
             this.gyroBuffer.push(reading);
-            if (this.gyroBuffer.length > this.bufferSize) {
-              this.gyroBuffer.shift();
-            }
+            if (this.gyroBuffer.length > this.bufferSize) this.gyroBuffer.shift();
       
-            // Update UI (smoothed)
             this.updateUI(reading);
       
-            // Check for circular motion
             if (this.gyroBuffer.length >= this.minCirclePoints && !this.isAnalyzing) {
               this.checkForCircularMotion();
             }
           }
       
           updateUI(reading) {
-            // Numbers panel
             document.getElementById('gyroData').textContent =
               `X: ${reading.x.toFixed(1)}°/s, Y: ${reading.y.toFixed(1)}°/s, Z: ${reading.z.toFixed(1)}°/s`;
       
-            const magnitude = Math.sqrt(reading.x*reading.x + reading.y*reading.y + reading.z*reading.z);
+            const magnitude = Math.sqrt(reading.x**2 + reading.y**2 + reading.z**2);
             document.getElementById('magnitude').textContent = magnitude.toFixed(1);
       
-            // Green dot: smooth to avoid jittery feel (UI only)
+            // Smooth the dot, then apply a visual deadzone
             this.uiX += this.uiAlpha * (reading.x - this.uiX);
             this.uiY += this.uiAlpha * (reading.y - this.uiY);
+            const visX = Math.abs(this.uiX) < this.visualDeadzone ? 0 : this.uiX;
+            const visY = Math.abs(this.uiY) < this.visualDeadzone ? 0 : this.uiY;
       
             const dot = document.getElementById('gyroDot');
-            const maxOffset = 90; // pixels
-            const scale = 2; // sensitivity
-            const offsetX = Math.max(-maxOffset, Math.min(maxOffset, this.uiX * scale));
-            const offsetY = Math.max(-maxOffset, Math.min(maxOffset, this.uiY * scale));
+            const maxOffset = 90;
+            const offsetX = Math.max(-maxOffset, Math.min(maxOffset, visX * this.uiScale));
+            const offsetY = Math.max(-maxOffset, Math.min(maxOffset, visY * this.uiScale));
             dot.style.transform = `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px))`;
           }
       
           checkForCircularMotion() {
             this.isAnalyzing = true;
             try {
-              const result1 = this.detectByAngularMomentum();
-              const result2 = this.detectByFrequency();
-              const result3 = this.detectByPattern();
+              const r1 = this.detectByAngularMomentum();
+              const r2 = this.detectByFrequency();
+              const r3 = this.detectByPattern();
       
-              const confidence = (result1.confidence * 0.4 +
-                                  result2.confidence * 0.3 +
-                                  result3.confidence * 0.3);
+              const confidence = (r1.confidence * 0.4) + (r2.confidence * 0.3) + (r3.confidence * 0.3);
       
               document.getElementById('confidenceBar').style.width = `${confidence * 100}%`;
               document.getElementById('confidenceText').textContent = `Confidence: ${(confidence * 100).toFixed(1)}%`;
       
               const now = Date.now();
-              const canDetect = (now - this.lastDetection) > this.rateLimitMs;
-      
-              if (confidence > 0.7 && canDetect) {
+              if (confidence > 0.7 && (now - this.lastDetection) > this.rateLimitMs) {
                 this.onCircularMotionDetected(confidence);
                 this.lastDetection = now;
               }
@@ -283,17 +270,19 @@
               return { detected: false, confidence: 0.0 };
             }
             const recent = this.gyroBuffer.slice(-50);
-            const magnitudes = recent.map(r =>
-              Math.sqrt(r.x * r.x + r.y * r.y + r.z * r.z)
-            );
+            const mags = recent.map(r => Math.sqrt(r.x*r.x + r.y*r.y + r.z*r.z));
       
-            const avgMagnitude = magnitudes.reduce((a, b) => a + b) / magnitudes.length;
-            const variance = this.calculateVariance(magnitudes);
+            const avgMag = mags.reduce((a,b)=>a+b,0) / mags.length;
+            const variance = this.calculateVariance(mags);
       
             const magnitudeConsistency = 1.0 - Math.min(1.0, variance / 1000.0);
-            const magnitudeScore = this.scoreInRange(avgMagnitude, this.minCircularVelocity, this.maxCircularVelocity);
+            const magnitudeScore = this.scoreInRange(avgMag, this.minCircularVelocity, this.maxCircularVelocity);
       
-            const confidence = magnitudeConsistency * 0.6 + magnitudeScore * 0.4;
+            // >>> key change: suppress "good consistency" when there is no motion
+            const activity = this.scoreInRange(avgMag, this.noiseFloor * 2, this.maxCircularVelocity);
+            const confidence = activity * (magnitudeConsistency * 0.6 + magnitudeScore * 0.4);
+            // <<<
+      
             return { detected: confidence > 0.5, confidence };
           }
       
@@ -301,19 +290,17 @@
             if (this.gyroBuffer.length < this.minCirclePoints) {
               return { detected: false, confidence: 0.0 };
             }
-      
             const recent = this.gyroBuffer.slice(-50);
             const xValues = recent.map(r => this._deadzone(r.x));
             const yValues = recent.map(r => this._deadzone(r.y));
             const zValues = recent.map(r => this._deadzone(r.z));
       
-            const xCrossings = this.countZeroCrossings(xValues);
-            const yCrossings = this.countZeroCrossings(yValues);
-            const zCrossings = this.countZeroCrossings(zValues);
+            const xCross = this.countZeroCrossings(xValues);
+            const yCross = this.countZeroCrossings(yValues);
+            const zCross = this.countZeroCrossings(zValues);
       
-            const avgCrossings = (xCrossings + yCrossings + zCrossings) / 3.0;
+            const avgCrossings = (xCross + yCross + zCross) / 3.0;
             const periodicityScore = this.scoreInRange(avgCrossings, 2.0, 6.0);
-      
             return { detected: periodicityScore > 0.5, confidence: periodicityScore };
           }
       
@@ -321,31 +308,24 @@
             if (this.gyroBuffer.length < this.minCirclePoints) {
               return { detected: false, confidence: 0.0 };
             }
-      
             const recent = this.gyroBuffer.slice(-40);
-            const angles = recent.map(r => Math.atan2(r.y, r.x)); // rotation in XY angular-velocity plane
+            const angles = recent.map(r => Math.atan2(r.y, r.x));
       
             const totalRotation = this.calculateTotalRotation(angles);
             const completeness = Math.min(1.0, totalRotation / (2 * Math.PI));
-      
-            if (completeness < this.completenessThreshold) {
-              return { detected: false, confidence: 0.0 };
-            }
+            if (completeness < this.completenessThreshold) return { detected: false, confidence: 0.0 };
       
             const smoothness = this.calculateRotationSmoothness(angles);
             const confidence = completeness * 0.7 + smoothness * 0.3;
-      
             return { detected: confidence > 0.6, confidence };
           }
       
-          _deadzone(v) {
-            return Math.abs(v) < this.zeroEps ? 0 : v;
-          }
+          _deadzone(v) { return Math.abs(v) < this.noiseFloor ? 0 : v; }
       
           calculateVariance(values) {
-            const mean = values.reduce((a, b) => a + b) / values.length;
-            const squaredDiffs = values.map(v => Math.pow(v - mean, 2));
-            return squaredDiffs.reduce((a, b) => a + b) / values.length;
+            const mean = values.reduce((a,b)=>a+b,0) / values.length;
+            const sq = values.map(v => (v - mean) * (v - mean));
+            return sq.reduce((a,b)=>a+b,0) / values.length;
           }
       
           scoreInRange(value, min, max) {
@@ -357,47 +337,39 @@
           countZeroCrossings(values) {
             let crossings = 0;
             for (let i = 1; i < values.length; i++) {
-              const prev = values[i - 1];
-              const curr = values[i];
-              if ((prev > 0 && curr <= 0) || (prev < 0 && curr >= 0)) {
-                crossings++;
-              }
+              const a = values[i-1], b = values[i];
+              if ((a > 0 && b <= 0) || (a < 0 && b >= 0)) crossings++;
             }
             return crossings;
           }
       
           calculateTotalRotation(angles) {
-            let total = 0.0;
+            let total = 0;
             for (let i = 1; i < angles.length; i++) {
-              let diff = angles[i] - angles[i - 1];
-              if (diff > Math.PI) diff -= 2 * Math.PI;
-              if (diff < -Math.PI) diff += 2 * Math.PI;
-              total += Math.abs(diff);
+              let d = angles[i] - angles[i-1];
+              if (d >  Math.PI) d -= 2*Math.PI;
+              if (d < -Math.PI) d += 2*Math.PI;
+              total += Math.abs(d);
             }
             return total;
           }
       
           calculateRotationSmoothness(angles) {
             if (angles.length < 3) return 0.0;
-            let totalCurvature = 0.0;
+            let totalCurv = 0;
             for (let i = 1; i < angles.length - 1; i++) {
-              const curvature = Math.abs(angles[i + 1] - 2 * angles[i] + angles[i - 1]);
-              totalCurvature += curvature;
+              totalCurv += Math.abs(angles[i+1] - 2*angles[i] + angles[i-1]);
             }
-            return Math.max(0.0, 1.0 - totalCurvature / angles.length);
+            return Math.max(0.0, 1.0 - totalCurv / angles.length);
           }
       
           onCircularMotionDetected(confidence) {
             console.log(`🔄 Circular motion detected! Confidence: ${(confidence * 100).toFixed(1)}%`);
-      
             document.body.style.background = 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)';
             setTimeout(() => {
               document.body.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
             }, 1000);
-      
-            if ('vibrate' in navigator) {
-              navigator.vibrate([200, 100, 200]);
-            }
+            if ('vibrate' in navigator) navigator.vibrate([200, 100, 200]);
       
             const historyItem = document.createElement('div');
             historyItem.className = 'detection-item';
@@ -407,11 +379,7 @@
             const status = document.getElementById('status');
             status.textContent = `🎉 CIRCULAR MOTION DETECTED! (${(confidence * 100).toFixed(1)}%)`;
             status.className = 'status detecting';
-      
-            setTimeout(() => {
-              status.textContent = 'Listening for circular motions...';
-              status.className = 'status active';
-            }, 2000);
+            setTimeout(() => { status.textContent = 'Listening for circular motions...'; status.className = 'status active'; }, 2000);
           }
         }
       
@@ -426,17 +394,11 @@
       
           if (needsPermission) {
             DeviceMotionEvent.requestPermission()
-              .then((permissionState) => {
-                if (permissionState === 'granted') {
-                  startGyroscope();
-                } else {
-                  alert('Motion permission denied. Please allow in browser settings.');
-                }
+              .then((state) => {
+                if (state === 'granted') startGyroscope();
+                else alert('Motion permission denied. Please allow in browser settings.');
               })
-              .catch((err) => {
-                console.error(err);
-                alert('Permission request failed.');
-              });
+              .catch((err) => { console.error(err); alert('Permission request failed.'); });
           } else {
             startGyroscope();
           }
@@ -446,12 +408,10 @@
           if (isDetectionActive) return;
           window.addEventListener('devicemotion', handleMotion);
           isDetectionActive = true;
-      
           document.getElementById('status').textContent = 'Listening for circular motions...';
           document.getElementById('status').className = 'status active';
           document.getElementById('startBtn').style.display = 'none';
           document.getElementById('stopBtn').style.display = 'inline-block';
-      
           console.log('🚀 Circular motion detection started');
         }
       
@@ -459,24 +419,18 @@
           if (!isDetectionActive) return;
           window.removeEventListener('devicemotion', handleMotion);
           isDetectionActive = false;
-      
           document.getElementById('status').textContent = 'Detection stopped';
           document.getElementById('status').className = 'status inactive';
           document.getElementById('startBtn').style.display = 'inline-block';
           document.getElementById('stopBtn').style.display = 'none';
-      
           console.log('⏹️ Circular motion detection stopped');
         }
       
         function handleMotion(event) {
           if (!isDetectionActive) return;
-      
           const rr = event.rotationRate;
           if (rr) {
-            // IMPORTANT: correct axis mapping + keep degrees/sec (NO extra conversion)
-            // beta ≈ rotation about device X (tilt front/back)
-            // gamma ≈ rotation about device Y (tilt left/right)
-            // alpha ≈ rotation about device Z (spin around screen normal)
+            // Correct axes; keep degrees/sec (no extra conversion)
             detector.addReading(
               rr.beta  || 0, // X
               rr.gamma || 0, // Y
@@ -492,10 +446,10 @@
         }
       
         window.addEventListener('load', () => {
-          console.log('📱 Circular Motion Detection Web Tester Ready');
-          console.log('💡 Tip: Spin your wrist (clockwise/counter-clockwise). Try both slow (~30–60°/s) and quick (>200°/s).');
+          console.log('📱 Ready. Idle confidence should hover near 0–5%, dot barely moves.');
         });
       </script>
+      
       
 </body>
 </html>
