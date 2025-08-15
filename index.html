@@ -697,38 +697,75 @@ class MotionDetector {
 let detector = null;
 let isActive = false;
 
-function startDetection() {
+// Tries to get devicemotion silently. Only falls back to requestPermission if needed.
+async function ensureMotionAccess() {
+  // No API? Nothing to do.
+  if (!('DeviceMotionEvent' in window)) return true;
+
+  // Some browsers don’t need/implement requestPermission at all.
+  const needsPerm = typeof DeviceMotionEvent.requestPermission === 'function';
+  if (!needsPerm) return true;
+
+  // Try to observe an event without prompting (if the site is already allowed).
+  return new Promise((resolve) => {
+    let got = false;
+    const probe = () => { got = true; window.removeEventListener('devicemotion', probe); resolve(true); };
+    window.addEventListener('devicemotion', probe, { passive: true });
+
+    // If nothing after a short wait, request in the same user gesture.
+    setTimeout(async () => {
+      if (got) return; // events already flowing; no prompt needed
+      try {
+        const res = await DeviceMotionEvent.requestPermission();
+        resolve(res === 'granted');
+      } catch {
+        resolve(false);
+      }
+    }, 400);
+  });
+}
+
+
+async function startDetection() {
   if (isActive) return;
-  
+
+  // Try silent access first; only prompt if truly required.
+  const ok = await ensureMotionAccess();
+  if (!ok) {
+    const n = document.getElementById('sensorNotice');
+    if (n) n.style.display = 'block';
+    return;
+  }
+
   const canvas = document.getElementById('pathCanvas');
   const dot = document.getElementById('motionDot');
-  
   detector = new MotionDetector(canvas, dot);
-  
+
   window.addEventListener('devicemotion', onMotionEvent, { passive: true });
   isActive = true;
-  
+
   const status = document.getElementById('status');
   if (status) {
     status.textContent = 'Calibrating... hold still';
     status.className = 'status';
   }
-  
+
   document.getElementById('startBtn').style.display = 'none';
   document.getElementById('stopBtn').style.display = 'inline-block';
-  
-  // Check for sensor availability
+
+  // Lightweight sanity check that data is coming
   let hasData = false;
-  const checkSensors = () => { hasData = true; };
-  window.addEventListener('devicemotion', checkSensors, { passive: true });
-  
+  const mark = () => { hasData = true; };
+  window.addEventListener('devicemotion', mark, { passive: true });
   setTimeout(() => {
-    window.removeEventListener('devicemotion', checkSensors);
+    window.removeEventListener('devicemotion', mark);
     if (!hasData) {
-      document.getElementById('sensorNotice').style.display = 'block';
+      const n = document.getElementById('sensorNotice');
+      if (n) n.style.display = 'block';
     }
-  }, 2000);
+  }, 1200);
 }
+
 
 function stopDetection() {
   if (!isActive) return;
