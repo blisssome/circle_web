@@ -138,9 +138,9 @@ class MotionDetector {
     this.rapidChanges = 0;
     this.shakeStartTime = 0;
     
-    // Smoothing
-    this.smoothedAccel = { x: 0, y: 0 };
-    this.prevAccel = { x: 0, y: 0 };
+    // Additional state for Dart-style detection
+    this.stillCount = 0;
+    this.wasMoving = false;
     
     // Thresholds
     this.circleMinRadius = 0.08;
@@ -193,10 +193,9 @@ class MotionDetector {
     this.circleStartTime = 0;
     this.circleQuality = 0;
     
-    // Shake reset  
-    this.shakeIntensity = 0;
-    this.rapidChanges = 0;
-    this.shakeStartTime = 0;
+    // Reset Dart-style state too
+    this.stillCount = 0;
+    this.wasMoving = false;
     
     this.motionHistory = [];
     this._updateUI();
@@ -282,92 +281,186 @@ class MotionDetector {
   }
   
   _detectCircles(sample) {
-    if (this.motionHistory.length < 20) return;
-    
-    // Get recent motion for analysis
-    const recent = this.motionHistory.slice(-40); // ~0.8 seconds
-    
-    // Find motion center using weighted average
-    let weightedX = 0, weightedY = 0, totalWeight = 0;
-    recent.forEach(s => {
-      const weight = s.accelMag + 0.1; // Avoid zero weights
-      weightedX += s.smoothAccel.x * weight;
-      weightedY += s.smoothAccel.y * weight;
-      totalWeight += weight;
-    });
-    
-    if (totalWeight > 0) {
-      this.circleCenter.x = weightedX / totalWeight;
-      this.circleCenter.y = weightedY / totalWeight;
+    // Store gyroscope-like data (angular velocity from acceleration)
+    if (this.motionHistory.length >= 2) {
+      const curr = sample.smoothAccel;
+      const prev = this.motionHistory[this.motionHistory.length - 2].smoothAccel;
+      
+      // Calculate angular-like motion from acceleration changes
+      const xGyroLike = (curr.x - prev.x) / sample.dt * 57.29; // Convert to degrees/sec
+      const zGyroLike = (curr.y - prev.y) / sample.dt * 57.29; // Using Y as Z for 2D
+      
+      // Store gyro-like data in motion history
+      this.motionHistory[this.motionHistory.length - 1].xGyro = xGyroLike;
+      this.motionHistory[this.motionHistory.length - 1].zGyro = zGyroLike;
     }
     
-    // Calculate radius and circular quality
-    const distances = recent.map(s => Math.sqrt(
-      (s.smoothAccel.x - this.circleCenter.x)**2 + 
-      (s.smoothAccel.y - this.circleCenter.y)**2
-    ));
-    
-    if (distances.length > 0) {
-      this.circleRadius = distances.reduce((a, b) => a + b) / distances.length;
-      
-      // Calculate radius consistency (lower variance = more circular)
-      const avgDist = this.circleRadius;
-      const variance = distances.reduce((sum, d) => sum + (d - avgDist)**2, 0) / distances.length;
-      const consistency = avgDist > 0.05 ? Math.max(0, 1 - Math.sqrt(variance) / avgDist) : 0;
-      
-      // Check for continuous rotation
-      const rotationScore = this._checkRotation(recent);
-      
-      // Combine scores for circle quality
-      this.circleQuality = (consistency * 0.6 + rotationScore * 0.4);
+    // Check if we have enough still time to analyze (adapted from Dart logic)
+    if (sample.accelMag < 0.3) {
+      this.stillCount = (this.stillCount || 0) + 1;
+      if (this.stillCount > 10 && this.wasMoving) { // Still for ~200ms
+        console.log('--------- start analyzing');
+        const cloneList = [...this.motionHistory];
+        this.motionHistory = [];
+        this._detectCircleFromHistory(cloneList);
+        this.wasMoving = false;
+        this.stillCount = 0;
+      }
+    } else {
+      this.stillCount = 0;
+      this.wasMoving = true;
     }
+  }
+  
+  _detectCircleFromHistory(history) {
+    if (history.length < 20) return;
     
-    // Track angular position for rotation measurement
-    if (this.circleRadius > this.circleMinRadius) {
-      const dx = sample.smoothAccel.x - this.circleCenter.x;
-      const dy = sample.smoothAccel.y - this.circleCenter.y;
-      const angle = Math.atan2(dy, dx);
+    // Extract gyro-like signals (adapted from Dart)
+    const zGyro = history.map(h => h.zGyro || 0).filter(v => Math.abs(v) > 5);
+    const xGyro = history.map(h => h.xGyro || 0).filter(v => Math.abs(v) > 5);
+    
+    if (zGyro.length < 10 || xGyro.length < 10) return;
+    
+    console.log(`z length = ${zGyro.length} | x length = ${xGyro.length}`);
+    
+    // Split signals based on consecutive low values (adapted from Dart)
+    const zGyroSplitted = this._splitWithConsecutiveZero(zGyro);
+    let index = 0;
+    
+    for (let i = 0; i < zGyroSplitted.length; i++) {
+      const zMovement = zGyroSplitted[i];
+      const xMovement = xGyro.slice(index, index + zMovement.length);
+      index += zMovement.length;
       
-      if (this.lastAngle !== null) {
-        let deltaAngle = angle - this.lastAngle;
-        if (deltaAngle > Math.PI) deltaAngle -= TAU;
-        if (deltaAngle < -Math.PI) deltaAngle += TAU;
+      // Check amplitude requirements (adapted from Dart)
+      const hasMoreThan80 = zMovement.some(e => e > 80);
+      const hasLessThanMinus80 = zMovement.some(e => e < -80);
+      
+      if (hasMoreThan80 && hasLessThanMinus80) {
+        const zAbsMax = Math.max(...zMovement.map(v => Math.abs(v)));
+        const maxXEntry = xMovement.reduce((max, val, idx) => 
+          Math.abs(val) >= Math.abs(max.value) ? {value: val, index: idx} : max, 
+          {value: xMovement[0] || 0, index: 0}
+        );
         
-        // Start tracking if quality is good
-        if (this.circleQuality > 0.4 && Math.abs(deltaAngle) > 0.02) {
-          if (this.circleStartTime === 0) {
-            this.circleStartTime = sample.time;
-            this.totalRotation = 0;
+        console.log(`maxX -- zAbsMax :::: ${maxXEntry.value} -- ${zAbsMax}`);
+        
+        // Check gyro relationship (adapted from Dart)
+        if (maxXEntry.value - zAbsMax > -50 && maxXEntry.value - zAbsMax < 300) {
+          // Discretize signals to detect smooth circular motion
+          const zResult = this._discretizeTriState([0, ...zMovement, 0], 0.3, 0.3, 6);
+          const xResult = this._discretizeTriState([0, ...xMovement, 0], 0.3, 0.3, 6);
+          
+          const zDirectionChanges = this._countDirectionChanges(zResult);
+          const xDirectionChanges = this._countDirectionChanges(xResult);
+          
+          console.log(`:::::::::::DIR CHANGES == ${JSON.stringify(zDirectionChanges)} ${JSON.stringify(xDirectionChanges)}`);
+          console.log(`:::::::::::Z RESULT == ${JSON.stringify(zResult)}`);
+          console.log(`:::::::::::X RESULT == ${JSON.stringify(xResult)}`);
+          
+          // Validate circular pattern (adapted from Dart)
+          if (zDirectionChanges.length === 2 && 
+              xDirectionChanges.length === 1 &&
+              maxXEntry.index >= (zDirectionChanges[1] - 20) && 
+              maxXEntry.index <= zDirectionChanges[1]) {
+            
+            this._onCircleDetected(zMovement.length * 0.02, zAbsMax / 100, 0.8); // Estimated values
+            console.log(`Circular gesture detected: segment ${i}`);
+          } else {
+            console.log('::::::::::::::zigzag detected..... circular movement prevented......');
           }
-          this.totalRotation += Math.abs(deltaAngle);
         }
       }
-      this.lastAngle = angle;
     }
+  }
+  
+  _splitWithConsecutiveZero(signal) {
+    const splitted = [];
+    let index = 0;
+    let lowSignalCount = 0;
+    let splitStart = false;
+    let splitEnd = false;
     
-    // Update progress
-    this.circleProgress = Math.min(1, this.totalRotation / TAU);
-    
-    // Check for complete circle
-    if (this.circleProgress > 0.85 && this.circleStartTime > 0) {
-      const duration = (sample.time - this.circleStartTime) / 1000;
-      
-      if (duration >= this.circleMinTime && 
-          duration <= this.circleMaxTime &&
-          this.circleQuality > 0.5 &&
-          this.circleRadius >= this.circleMinRadius &&
-          this.circleRadius <= this.circleMaxRadius) {
-        
-        this._onCircleDetected(duration, this.circleRadius, this.circleQuality);
+    for (let i = 0; i < signal.length; i++) {
+      if (Math.abs(signal[i]) < 5) {
+        lowSignalCount++;
+        if (lowSignalCount > 10 && !splitStart) {
+          splitStart = true;
+        }
+        if (lowSignalCount > 10 && !splitEnd) {
+          splitEnd = true;
+        }
+      } else {
+        lowSignalCount = 0;
+        if (splitStart && splitEnd) {
+          splitted.push(signal.slice(index, i + 1));
+          splitStart = false;
+          splitEnd = false;
+          index = i + 1;
+        }
       }
     }
     
-    // Reset if motion becomes non-circular or stops
-    if (sample.accelMag < 0.3 || this.circleQuality < 0.2) {
-      if (this.circleStartTime > 0 && sample.time - this.circleStartTime > 1500) {
-        this._resetCircleDetection();
+    splitted.push(signal.slice(Math.min(index, signal.length)));
+    return splitted;
+  }
+  
+  _discretizeTriState(signal, posRatio = 0.5, negRatio = 0.5, minRun = 3) {
+    if (signal.length === 0) return [];
+    
+    // Find max positive and min negative
+    const maxPos = Math.max(...signal.filter(v => v > 0), 0);
+    const minNeg = Math.min(...signal.filter(v => v < 0), 0);
+    
+    const thPos = maxPos * posRatio;
+    const thNeg = minNeg * negRatio; // remains negative
+    
+    // Tri-state quantization
+    let states = signal.map(v => {
+      if (maxPos > 0 && v >= thPos) return 1;
+      if (minNeg < 0 && v <= thNeg) return -1;
+      return 0;
+    });
+    
+    // Debounce (ignore small sequences)
+    if (minRun > 1 && states.length > 0) {
+      states = this._minRunFilter(states, minRun);
+    }
+    
+    return states;
+  }
+  
+  _minRunFilter(data, minRun) {
+    const out = [...data];
+    let i = 0;
+    
+    while (i < out.length) {
+      const v = out[i];
+      let j = i;
+      while (j < out.length && out[j] === v) {
+        j++;
+      }
+      const runLen = j - i;
+      if (v !== 0 && runLen < minRun) {
+        for (let k = i; k < j; k++) {
+          out[k] = 0;
+        }
+      }
+      i = j;
+    }
+    return out;
+  }
+  
+  _countDirectionChanges(states) {
+    const directionChanges = [];
+    for (let i = 1; i < states.length; i++) {
+      if ((states[i - 1] === 0 || states[i - 1] === -1) && states[i] === 1) {
+        directionChanges.push(i);
+      } else if ((states[i - 1] === 0 || states[i - 1] === 1) && states[i] === -1) {
+        directionChanges.push(i);
       }
     }
+    return directionChanges;
   }
   
   _checkRotation(samples) {
@@ -656,46 +749,42 @@ function stopDetection() {
 function onMotionEvent(event) {
   if (!detector) return;
 
-  // Normalize objects (some browsers return null components)
-  const normalizeVec3 = (v) => {
-    if (!v) return null;
-    const nx = Number.isFinite(v.x) ? v.x : 0;
-    const ny = Number.isFinite(v.y) ? v.y : 0;
-    const nz = Number.isFinite(v.z) ? v.z : 0;
-    return { x: nx, y: ny, z: nz };
-  };
+  // Normalize motion fields (some browsers return nulls)
+  const a  = event.acceleration || null;
+  const ag = event.accelerationIncludingGravity || null;
+  const rr = event.rotationRate || null;
 
-  const acceleration = normalizeVec3(event.acceleration);
-  const accelerationGravity = normalizeVec3(event.accelerationIncludingGravity);
-  const rotationRate = event.rotationRate ? {
-    alpha: Number.isFinite(event.rotationRate.alpha) ? event.rotationRate.alpha : 0,
-    beta:  Number.isFinite(event.rotationRate.beta)  ? event.rotationRate.beta  : 0,
-    gamma: Number.isFinite(event.rotationRate.gamma) ? event.rotationRate.gamma : 0
-  } : null;
+  const accel = a
+    ? { x: a.x || 0, y: a.y || 0, z: a.z || 0 }
+    : null;
 
-  // Use event.timeStamp if available; fall back to performance.now()
-  const ts = (typeof event.timeStamp === 'number') ? event.timeStamp : performance.now();
+  const accelG = ag
+    ? { x: ag.x || 0, y: ag.y || 0, z: ag.z || 0 }
+    : null;
 
-  detector.addMotionSample(acceleration, accelerationGravity, rotationRate, ts);
+  // rotationRate (deg/s). We pass through; the detector mainly uses accel deltas.
+  const rot = rr
+    ? { alpha: rr.alpha || 0, beta: rr.beta || 0, gamma: rr.gamma || 0 }
+    : null;
+
+  // Lazy-init smoothers to avoid NaNs on the first frame
+  if (!detector.smoothedAccel) detector.smoothedAccel = { x: 0, y: 0 };
+  if (!detector.prevAccel)     detector.prevAccel     = { x: 0, y: 0 };
+
+  detector.addMotionSample(accel, accelG, rot, performance.now());
 }
 
-// Simple helper hooked to the "Clear History" button
 function clearHistory() {
   const history = document.getElementById('history');
   if (history) history.innerHTML = '';
-
-  // Reset visuals and metrics
+  // Reset visual/progress state
   if (detector) detector._resetDetection();
-
-  const status = document.getElementById('status');
-  if (status) {
-    status.textContent = 'Ready! Make circles or shakes';
-    status.className = 'status active';
-  }
-
-  const notice = document.getElementById('sensorNotice');
-  if (notice) notice.style.display = 'none';
 }
+
+// Keep canvas crisp on orientation/resize
+window.addEventListener('resize', () => {
+  if (detector && detector._setupCanvas) detector._setupCanvas();
+});
 </script>
 </body>
 </html>
