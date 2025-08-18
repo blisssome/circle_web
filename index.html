@@ -1,827 +1,429 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Circle vs Shake Detector</title>
-<style>
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{
-    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-    background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
-    min-height:100vh;display:flex;justify-content:center;align-items:center;color:#fff
-  }
-  .container{
-    background:rgba(255,255,255,.1);backdrop-filter:blur(10px);
-    border-radius:20px;padding:24px;width:min(420px,92vw);text-align:center;
-    box-shadow:0 8px 32px rgba(0,0,0,.12);border:1px solid rgba(255,255,255,.2)
-  }
-  h1{font-size:22px;font-weight:700;margin-bottom:12px}
-  .status{padding:12px;border-radius:10px;margin:12px 0;font-weight:600;border:1px solid rgba(255,255,255,.35)}
-  .status.active{background:rgba(76,175,80,.18);border-color:rgba(76,175,80,.55)}
-  .status.circle{background:rgba(33,150,243,.2);border-color:rgba(33,150,243,.6);animation:pulse 1.5s infinite}
-  .status.shake{background:rgba(255,87,34,.2);border-color:rgba(255,87,34,.6);animation:pulse 1.5s infinite}
-  @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.02)}}
-  .visual{
-    position:relative;width:280px;height:280px;margin:14px auto 10px;border-radius:50%;
-    border:2px solid rgba(255,255,255,.28);background:rgba(255,255,255,.06);
-    box-shadow:inset 0 0 0 2px rgba(255,255,255,.08);overflow:hidden
-  }
-  canvas#pathCanvas{width:100%;height:100%;display:block}
-  #motionDot{
-    position:absolute;width:12px;height:12px;border-radius:50%;
-    background:#4CAF50;top:50%;left:50%;transform:translate(-50%,-50%);
-    box-shadow:0 0 0 2px rgba(0,0,0,.12);transition:transform .08s ease
-  }
-  .dual-progress{display:flex;gap:8px;margin:8px 0}
-  .progress-container{flex:1}
-  .progress-label{font-size:12px;margin-bottom:4px;opacity:0.8}
-  .progress-bar{width:100%;height:16px;background:rgba(255,255,255,.2);border-radius:8px;overflow:hidden}
-  .progress-fill{height:100%;width:0%;border-radius:8px;transition:width .2s ease}
-  .circle-fill{background:linear-gradient(90deg,#2196F3,#03DAC6)}
-  .shake-fill{background:linear-gradient(90deg,#FF5722,#FF9800)}
-  .data-display{background:rgba(0,0,0,.22);border-radius:10px;padding:12px;margin-top:12px;
-    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;font-size:11px;text-align:left}
-  .data-row{display:flex;justify-content:space-between;margin:3px 0}
-  .detection-history{max-height:140px;overflow-y:auto;background:rgba(0,0,0,.22);border-radius:10px;padding:10px;margin-top:12px;text-align:left}
-  .detection-item{padding:4px 0;border-bottom:1px solid rgba(255,255,255,.12);font-size:13px}
-  .detection-item.circle{color:#64B5F6}
-  .detection-item.shake{color:#FF8A65}
-  button{
-    background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.34);color:#fff;
-    padding:10px 18px;border-radius:22px;cursor:pointer;font-size:15px;margin:8px 6px;transition:all .15s ease
-  }
-  button:hover{background:rgba(255,255,255,.28);transform:translateY(-1px)}
-  button:active{transform:translateY(0)}
-  #sensorNotice{display:none;margin-top:8px;padding:10px;border-radius:10px;background:rgba(255,107,107,.18);border:1px solid rgba(255,107,107,.5);font-size:13px;text-align:left}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Double Back Tap Detector</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        }
+
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 2rem;
+            text-align: center;
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            max-width: 400px;
+            width: 90%;
+        }
+
+        h1 {
+            margin-bottom: 1.5rem;
+            font-size: 2rem;
+            background: linear-gradient(45deg, #ff6b6b, #4ecdc4);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .status {
+            font-size: 1.2rem;
+            margin-bottom: 1rem;
+            padding: 1rem;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .status.listening {
+            background: rgba(76, 175, 80, 0.3);
+            border: 2px solid #4CAF50;
+        }
+
+        .status.detected {
+            background: rgba(255, 193, 7, 0.3);
+            border: 2px solid #FFC107;
+            animation: pulse 0.5s ease-in-out;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+
+        button {
+            background: linear-gradient(45deg, #ff6b6b, #4ecdc4);
+            border: none;
+            color: white;
+            padding: 12px 24px;
+            font-size: 1rem;
+            border-radius: 25px;
+            cursor: pointer;
+            margin: 0.5rem;
+            transition: transform 0.2s, box-shadow 0.2s;
+            font-weight: 600;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .metrics {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin: 1rem 0;
+            text-align: left;
+        }
+
+        .metric {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 0.8rem;
+            border-radius: 8px;
+            font-size: 0.9rem;
+        }
+
+        .metric-label {
+            font-weight: bold;
+            color: #4ecdc4;
+        }
+
+        .tap-count {
+            font-size: 3rem;
+            font-weight: bold;
+            margin: 1rem 0;
+            background: linear-gradient(45deg, #ff6b6b, #4ecdc4);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .instructions {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 1rem;
+            border-radius: 10px;
+            margin-top: 1rem;
+            font-size: 0.9rem;
+            line-height: 1.4;
+        }
+    </style>
 </head>
 <body>
-  <div class="container">
-    <h1>🔄 Circle vs Shake Detector</h1>
-
-    <div id="status" class="status">Move your arm - circles or shakes will be detected</div>
-
-    <div class="visual">
-      <canvas id="pathCanvas"></canvas>
-      <div id="motionDot"></div>
-    </div>
-
-    <div class="dual-progress">
-      <div class="progress-container">
-        <div class="progress-label">Circle Progress</div>
-        <div class="progress-bar"><div id="circleBar" class="progress-fill circle-fill"></div></div>
-      </div>
-      <div class="progress-container">
-        <div class="progress-label">Shake Intensity</div>
-        <div class="progress-bar"><div id="shakeBar" class="progress-fill shake-fill"></div></div>
-      </div>
-    </div>
-
-    <div>
-      <button id="startBtn" onclick="startDetection()">Start Detection</button>
-      <button id="stopBtn" onclick="stopDetection()" style="display:none;">Stop</button>
-      <button onclick="clearHistory()">Clear History</button>
-    </div>
-
-    <div class="data-display">
-      <div class="data-row"><span>Motion Type:</span> <span id="motionType">None</span></div>
-      <div class="data-row"><span>Circular Score:</span> <span id="circleScore">0%</span></div>
-      <div class="data-row"><span>Shake Score:</span> <span id="shakeScore">0%</span></div>
-      <div class="data-row"><span>Angular Vel:</span> <span id="angularVel">0 °/s</span></div>
-      <div class="data-row"><span>Frequency:</span> <span id="frequency">0 Hz</span></div>
-      <div class="data-row"><span>Radius Est:</span> <span id="radius">0 cm</span></div>
-    </div>
-
-    <div class="detection-history">
-      <strong>Detection History:</strong>
-      <div id="history"></div>
-    </div>
-
-    <div id="sensorNotice">
-      <strong>No motion data received.</strong><br>
-      iPhone/iPad: Safari → "aA" → Website Settings → Motion & Orientation Access → ON, then reload.<br>
-      Android Chrome: lock icon → Site settings → Motion sensors → Allow.
-    </div>
-  </div>
-
-<script>
-const TAU = Math.PI * 2;
-const DEG = 180 / Math.PI;
-
-class MotionDetector {
-  constructor(canvas, dot) {
-    this.canvas = canvas;
-    this.ctx = canvas.getContext('2d');
-    this.dot = dot;
-    
-    // State variables
-    this.isCalibrating = true;
-    this.calibrationStart = 0;
-    this.gravity = null;
-    this.lastTime = 0;
-    this.motionHistory = [];
-    this.maxHistoryLength = 100; // 2 seconds at 50Hz
-    
-    // Circle detection
-    this.circleProgress = 0;
-    this.totalRotation = 0;
-    this.circleStartTime = 0;
-    this.lastAngle = null;
-    this.circleCenter = { x: 0, y: 0 };
-    this.circleRadius = 0;
-    this.circleQuality = 0;
-    
-    // Shake detection  
-    this.shakeIntensity = 0;
-    this.shakeFrequency = 0;
-    this.rapidChanges = 0;
-    this.shakeStartTime = 0;
-    
-    // Additional state for Dart-style detection
-    this.stillCount = 0;
-    this.wasMoving = false;
-    
-    // Thresholds
-    this.circleMinRadius = 0.08;
-    this.circleMaxRadius = 0.7;
-    this.circleMinTime = 0.6;
-    this.circleMaxTime = 4.0;
-    this.shakeThreshold = 2.0;
-    this.shakeMinFreq = 2.0; // Hz
-    
-    this._setupCanvas();
-    this._resetDetection();
-  }
-  
-  _setupCanvas() {
-    const rect = this.canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    
-    this.canvas.width = rect.width * dpr;
-    this.canvas.height = rect.height * dpr;
-    this.ctx.scale(dpr, dpr);
-    
-    this.canvasWidth = rect.width;
-    this.canvasHeight = rect.height;
-    this.centerX = this.canvasWidth / 2;
-    this.centerY = this.canvasHeight / 2;
-    this.visualRadius = Math.min(this.canvasWidth, this.canvasHeight) * 0.35;
-    
-    this.ctx.lineWidth = 2;
-    this.ctx.lineCap = 'round';
-    this._clearCanvas();
-  }
-  
-  _clearCanvas() {
-    this.ctx.clearRect(0, 0, this.canvasWidth, this.canvasHeight);
-    
-    // Draw reference circle
-    this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-    this.ctx.beginPath();
-    this.ctx.arc(this.centerX, this.centerY, this.visualRadius, 0, TAU);
-    this.ctx.stroke();
-    
-    this.pathStarted = false;
-  }
-  
-  _resetDetection() {
-    // Circle reset
-    this.circleProgress = 0;
-    this.totalRotation = 0;
-    this.lastAngle = null;
-    this.circleStartTime = 0;
-    this.circleQuality = 0;
-    
-    // Reset Dart-style state too
-    this.stillCount = 0;
-    this.wasMoving = false;
-    
-    this.motionHistory = [];
-    this._updateUI();
-    this._clearCanvas();
-  }
-  
-  addMotionSample(acceleration, accelerationGravity, rotationRate, timestamp) {
-    const now = timestamp || performance.now();
-    const dt = this.lastTime ? Math.max(0.001, (now - this.lastTime) / 1000) : 1/60;
-    this.lastTime = now;
-    
-    // Establish gravity vector
-    if (!this.gravity && accelerationGravity) {
-      this.gravity = { x: accelerationGravity.x, y: accelerationGravity.y, z: accelerationGravity.z };
-      return;
-    }
-    if (!this.gravity) return;
-    
-    // Update gravity estimate
-    if (accelerationGravity) {
-      const alpha = 0.02;
-      this.gravity.x = (1 - alpha) * this.gravity.x + alpha * accelerationGravity.x;
-      this.gravity.y = (1 - alpha) * this.gravity.y + alpha * accelerationGravity.y;
-      this.gravity.z = (1 - alpha) * this.gravity.z + alpha * accelerationGravity.z;
-    }
-    
-    // Calculate linear acceleration
-    let linearAccel = { x: 0, y: 0, z: 0 };
-    if (acceleration) {
-      linearAccel = acceleration;
-    } else if (accelerationGravity) {
-      linearAccel = {
-        x: accelerationGravity.x - this.gravity.x,
-        y: accelerationGravity.y - this.gravity.y,
-        z: accelerationGravity.z - this.gravity.z
-      };
-    }
-    
-    // Smooth acceleration
-    const smoothing = 0.15;
-    this.smoothedAccel.x = (1 - smoothing) * this.smoothedAccel.x + smoothing * linearAccel.x;
-    this.smoothedAccel.y = (1 - smoothing) * this.smoothedAccel.y + smoothing * linearAccel.y;
-    
-    const accelMag = Math.sqrt(this.smoothedAccel.x**2 + this.smoothedAccel.y**2);
-    
-    // Store motion sample
-    const sample = {
-      time: now,
-      accel: { x: linearAccel.x, y: linearAccel.y },
-      smoothAccel: { x: this.smoothedAccel.x, y: this.smoothedAccel.y },
-      accelMag: accelMag,
-      dt: dt
-    };
-    
-    this.motionHistory.push(sample);
-    if (this.motionHistory.length > this.maxHistoryLength) {
-      this.motionHistory.shift();
-    }
-    
-    // Calibration
-    if (this.isCalibrating) {
-      if (this.calibrationStart === 0) this.calibrationStart = now;
-      if (now - this.calibrationStart > 800) {
-        this.isCalibrating = false;
-        const status = document.getElementById('status');
-        if (status) {
-          status.textContent = 'Ready! Make circles or shakes';
-          status.className = 'status active';
-        }
-      }
-      return;
-    }
-    
-    // Run both detectors simultaneously
-    this._detectCircles(sample);
-    this._detectShakes(sample);
-    
-    // Update visualization
-    this._updateVisualization(sample);
-    this._updateUI();
-    
-    this.prevAccel = { x: linearAccel.x, y: linearAccel.y };
-  }
-  
-  _detectCircles(sample) {
-    // Store gyroscope-like data (angular velocity from acceleration)
-    if (this.motionHistory.length >= 2) {
-      const curr = sample.smoothAccel;
-      const prev = this.motionHistory[this.motionHistory.length - 2].smoothAccel;
-      
-      // Calculate angular-like motion from acceleration changes
-      const xGyroLike = (curr.x - prev.x) / sample.dt * 57.29; // Convert to degrees/sec
-      const zGyroLike = (curr.y - prev.y) / sample.dt * 57.29; // Using Y as Z for 2D
-      
-      // Store gyro-like data in motion history
-      this.motionHistory[this.motionHistory.length - 1].xGyro = xGyroLike;
-      this.motionHistory[this.motionHistory.length - 1].zGyro = zGyroLike;
-    }
-    
-    // Check if we have enough still time to analyze (adapted from Dart logic)
-    if (sample.accelMag < 0.3) {
-      this.stillCount = (this.stillCount || 0) + 1;
-      if (this.stillCount > 10 && this.wasMoving) { // Still for ~200ms
-        console.log('--------- start analyzing');
-        const cloneList = [...this.motionHistory];
-        this.motionHistory = [];
-        this._detectCircleFromHistory(cloneList);
-        this.wasMoving = false;
-        this.stillCount = 0;
-      }
-    } else {
-      this.stillCount = 0;
-      this.wasMoving = true;
-    }
-  }
-  
-  _detectCircleFromHistory(history) {
-    if (history.length < 20) return;
-    
-    // Extract gyro-like signals (adapted from Dart)
-    const zGyro = history.map(h => h.zGyro || 0).filter(v => Math.abs(v) > 5);
-    const xGyro = history.map(h => h.xGyro || 0).filter(v => Math.abs(v) > 5);
-    
-    if (zGyro.length < 10 || xGyro.length < 10) return;
-    
-    console.log(`z length = ${zGyro.length} | x length = ${xGyro.length}`);
-    
-    // Split signals based on consecutive low values (adapted from Dart)
-    const zGyroSplitted = this._splitWithConsecutiveZero(zGyro);
-    let index = 0;
-    
-    for (let i = 0; i < zGyroSplitted.length; i++) {
-      const zMovement = zGyroSplitted[i];
-      const xMovement = xGyro.slice(index, index + zMovement.length);
-      index += zMovement.length;
-      
-      // Check amplitude requirements (adapted from Dart)
-      const hasMoreThan80 = zMovement.some(e => e > 80);
-      const hasLessThanMinus80 = zMovement.some(e => e < -80);
-      
-      if (hasMoreThan80 && hasLessThanMinus80) {
-        const zAbsMax = Math.max(...zMovement.map(v => Math.abs(v)));
-        const maxXEntry = xMovement.reduce((max, val, idx) => 
-          Math.abs(val) >= Math.abs(max.value) ? {value: val, index: idx} : max, 
-          {value: xMovement[0] || 0, index: 0}
-        );
+    <div class="container">
+        <h1>Double Back Tap Detector</h1>
         
-        console.log(`maxX -- zAbsMax :::: ${maxXEntry.value} -- ${zAbsMax}`);
-        
-        // Check gyro relationship (adapted from Dart)
-        if (maxXEntry.value - zAbsMax > -50 && maxXEntry.value - zAbsMax < 300) {
-          // Discretize signals to detect smooth circular motion
-          const zResult = this._discretizeTriState([0, ...zMovement, 0], 0.3, 0.3, 6);
-          const xResult = this._discretizeTriState([0, ...xMovement, 0], 0.3, 0.3, 6);
-          
-          const zDirectionChanges = this._countDirectionChanges(zResult);
-          const xDirectionChanges = this._countDirectionChanges(xResult);
-          
-          console.log(`:::::::::::DIR CHANGES == ${JSON.stringify(zDirectionChanges)} ${JSON.stringify(xDirectionChanges)}`);
-          console.log(`:::::::::::Z RESULT == ${JSON.stringify(zResult)}`);
-          console.log(`:::::::::::X RESULT == ${JSON.stringify(xResult)}`);
-          
-          // Validate circular pattern (adapted from Dart)
-          if (zDirectionChanges.length === 2 && 
-              xDirectionChanges.length === 1 &&
-              maxXEntry.index >= (zDirectionChanges[1] - 20) && 
-              maxXEntry.index <= zDirectionChanges[1]) {
-            
-            this._onCircleDetected(zMovement.length * 0.02, zAbsMax / 100, 0.8); // Estimated values
-            console.log(`Circular gesture detected: segment ${i}`);
-          } else {
-            console.log('::::::::::::::zigzag detected..... circular movement prevented......');
-          }
+        <div id="status" class="status">
+            Click "Start Detection" to begin
+        </div>
+
+        <div class="tap-count" id="tapCount">0</div>
+        <div style="font-size: 0.9rem; margin-bottom: 1rem;">Double Taps Detected</div>
+
+        <div class="metrics">
+            <div class="metric">
+                <div class="metric-label">Acceleration X:</div>
+                <div id="accelX">0.00</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Acceleration Y:</div>
+                <div id="accelY">0.00</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Acceleration Z:</div>
+                <div id="accelZ">0.00</div>
+            </div>
+            <div class="metric">
+                <div class="metric-label">Magnitude:</div>
+                <div id="magnitude">0.00</div>
+            </div>
+        </div>
+
+        <button id="startBtn" onclick="startDetection()">Start Detection</button>
+        <button id="stopBtn" onclick="stopDetection()" disabled>Stop Detection</button>
+        <button onclick="resetCount()">Reset Count</button>
+
+        <div class="instructions">
+            <strong>Instructions:</strong><br>
+            1. Hold your phone firmly<br>
+            2. Double tap on the back of your phone<br>
+            3. The detector will recognize the pattern
+        </div>
+    </div>
+
+    <script>
+        class DoubleTapDetector {
+            constructor() {
+                this.isListening = false;
+                this.accelerationBuffer = [];
+                this.tapCount = 0;
+                this.lastTapTime = 0;
+                
+                // Detection parameters
+                this.bufferSize = 100;
+                this.tapThreshold = 15; // m/s²
+                this.doubleTapWindow = 500; // milliseconds
+                this.cooldownPeriod = 300; // milliseconds
+                this.minTapDuration = 50; // milliseconds
+                this.maxTapDuration = 200; // milliseconds
+                
+                // Rate limiter
+                this.lastDetectionTime = 0;
+                this.rateLimitDelay = 1000; // 1 second
+                
+                this.updateElements();
+            }
+
+            startListening() {
+                if ('DeviceMotionEvent' in window) {
+                    // Request permission for iOS 13+
+                    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+                        DeviceMotionEvent.requestPermission()
+                            .then(response => {
+                                if (response === 'granted') {
+                                    this.initializeListener();
+                                } else {
+                                    this.showStatus('Permission denied for motion sensors', false);
+                                }
+                            })
+                            .catch(error => {
+                                this.showStatus('Error requesting permission', false);
+                            });
+                    } else {
+                        // Non-iOS or older iOS
+                        this.initializeListener();
+                    }
+                } else {
+                    this.showStatus('Device motion not supported', false);
+                }
+            }
+
+            initializeListener() {
+                this.isListening = true;
+                this.accelerationBuffer = [];
+                this.showStatus('Listening for double taps...', true);
+                
+                window.addEventListener('devicemotion', this.handleMotion.bind(this));
+                
+                document.getElementById('startBtn').disabled = true;
+                document.getElementById('stopBtn').disabled = false;
+            }
+
+            stopListening() {
+                this.isListening = false;
+                window.removeEventListener('devicemotion', this.handleMotion.bind(this));
+                this.showStatus('Detection stopped', false);
+                
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('stopBtn').disabled = true;
+            }
+
+            handleMotion(event) {
+                if (!this.isListening) return;
+
+                const acceleration = event.accelerationIncludingGravity;
+                if (!acceleration) return;
+
+                const x = acceleration.x || 0;
+                const y = acceleration.y || 0;
+                const z = acceleration.z || 0;
+                
+                // Calculate magnitude
+                const magnitude = Math.sqrt(x*x + y*y + z*z);
+                
+                // Update UI
+                this.updateAcceleration(x, y, z, magnitude);
+                
+                // Add to buffer
+                const dataPoint = {
+                    x, y, z, magnitude,
+                    timestamp: Date.now()
+                };
+                
+                this.accelerationBuffer.push(dataPoint);
+                
+                // Keep buffer size manageable
+                if (this.accelerationBuffer.length > this.bufferSize) {
+                    this.accelerationBuffer.shift();
+                }
+                
+                // Detect taps
+                this.detectDoubleTap();
+            }
+
+            detectDoubleTap() {
+                if (this.accelerationBuffer.length < 10) return;
+                
+                const now = Date.now();
+                const recentData = this.accelerationBuffer.filter(
+                    point => now - point.timestamp < 1000
+                );
+                
+                // Find significant acceleration spikes (potential taps)
+                const spikes = this.findAccelerationSpikes(recentData);
+                
+                if (spikes.length >= 2) {
+                    const [firstSpike, secondSpike] = spikes.slice(-2);
+                    const timeDiff = secondSpike.timestamp - firstSpike.timestamp;
+                    
+                    // Check if spikes are within double tap window
+                    if (timeDiff >= this.minTapDuration && 
+                        timeDiff <= this.doubleTapWindow &&
+                        this.shouldAllowDetection()) {
+                        
+                        this.onDoubleTapDetected();
+                        // Clear buffer to prevent multiple detections
+                        this.accelerationBuffer = [];
+                    }
+                }
+            }
+
+            findAccelerationSpikes(data) {
+                const spikes = [];
+                
+                for (let i = 2; i < data.length - 2; i++) {
+                    const current = data[i];
+                    const prev = data[i - 1];
+                    const next = data[i + 1];
+                    
+                    // Look for sudden increases in acceleration magnitude
+                    const deltaFromPrev = current.magnitude - prev.magnitude;
+                    const deltaToNext = current.magnitude - next.magnitude;
+                    
+                    if (deltaFromPrev > this.tapThreshold && 
+                        deltaToNext > this.tapThreshold / 2 &&
+                        current.magnitude > this.tapThreshold) {
+                        
+                        // Check if this spike is distinct from previous ones
+                        const isDistinct = spikes.every(spike => 
+                            Math.abs(current.timestamp - spike.timestamp) > this.minTapDuration
+                        );
+                        
+                        if (isDistinct) {
+                            spikes.push({
+                                timestamp: current.timestamp,
+                                magnitude: current.magnitude,
+                                x: current.x,
+                                y: current.y,
+                                z: current.z
+                            });
+                        }
+                    }
+                }
+                
+                return spikes;
+            }
+
+            shouldAllowDetection() {
+                const now = Date.now();
+                if (now - this.lastDetectionTime > this.rateLimitDelay) {
+                    this.lastDetectionTime = now;
+                    return true;
+                }
+                return false;
+            }
+
+            onDoubleTapDetected() {
+                this.tapCount++;
+                this.updateTapCount();
+                this.showStatus('Double tap detected! 🎉', true, true);
+                
+                // Vibrate if supported
+                if (navigator.vibrate) {
+                    navigator.vibrate([100, 50, 100]);
+                }
+                
+                // Reset status after 2 seconds
+                setTimeout(() => {
+                    if (this.isListening) {
+                        this.showStatus('Listening for double taps...', true);
+                    }
+                }, 2000);
+                
+                console.log('Double tap detected!', this.tapCount);
+            }
+
+            showStatus(message, isActive, isDetected = false) {
+                const statusEl = document.getElementById('status');
+                statusEl.textContent = message;
+                statusEl.className = 'status';
+                
+                if (isDetected) {
+                    statusEl.classList.add('detected');
+                } else if (isActive) {
+                    statusEl.classList.add('listening');
+                }
+            }
+
+            updateAcceleration(x, y, z, magnitude) {
+                document.getElementById('accelX').textContent = x.toFixed(2);
+                document.getElementById('accelY').textContent = y.toFixed(2);
+                document.getElementById('accelZ').textContent = z.toFixed(2);
+                document.getElementById('magnitude').textContent = magnitude.toFixed(2);
+            }
+
+            updateTapCount() {
+                document.getElementById('tapCount').textContent = this.tapCount;
+            }
+
+            resetCount() {
+                this.tapCount = 0;
+                this.updateTapCount();
+                console.log('Tap count reset');
+            }
+
+            updateElements() {
+                this.updateTapCount();
+            }
         }
-      }
-    }
-  }
-  
-  _splitWithConsecutiveZero(signal) {
-    const splitted = [];
-    let index = 0;
-    let lowSignalCount = 0;
-    let splitStart = false;
-    let splitEnd = false;
-    
-    for (let i = 0; i < signal.length; i++) {
-      if (Math.abs(signal[i]) < 5) {
-        lowSignalCount++;
-        if (lowSignalCount > 10 && !splitStart) {
-          splitStart = true;
+
+        // Global detector instance
+        const detector = new DoubleTapDetector();
+
+        function startDetection() {
+            detector.startListening();
         }
-        if (lowSignalCount > 10 && !splitEnd) {
-          splitEnd = true;
+
+        function stopDetection() {
+            detector.stopListening();
         }
-      } else {
-        lowSignalCount = 0;
-        if (splitStart && splitEnd) {
-          splitted.push(signal.slice(index, i + 1));
-          splitStart = false;
-          splitEnd = false;
-          index = i + 1;
+
+        function resetCount() {
+            detector.resetCount();
         }
-      }
-    }
-    
-    splitted.push(signal.slice(Math.min(index, signal.length)));
-    return splitted;
-  }
-  
-  _discretizeTriState(signal, posRatio = 0.5, negRatio = 0.5, minRun = 3) {
-    if (signal.length === 0) return [];
-    
-    // Find max positive and min negative
-    const maxPos = Math.max(...signal.filter(v => v > 0), 0);
-    const minNeg = Math.min(...signal.filter(v => v < 0), 0);
-    
-    const thPos = maxPos * posRatio;
-    const thNeg = minNeg * negRatio; // remains negative
-    
-    // Tri-state quantization
-    let states = signal.map(v => {
-      if (maxPos > 0 && v >= thPos) return 1;
-      if (minNeg < 0 && v <= thNeg) return -1;
-      return 0;
-    });
-    
-    // Debounce (ignore small sequences)
-    if (minRun > 1 && states.length > 0) {
-      states = this._minRunFilter(states, minRun);
-    }
-    
-    return states;
-  }
-  
-  _minRunFilter(data, minRun) {
-    const out = [...data];
-    let i = 0;
-    
-    while (i < out.length) {
-      const v = out[i];
-      let j = i;
-      while (j < out.length && out[j] === v) {
-        j++;
-      }
-      const runLen = j - i;
-      if (v !== 0 && runLen < minRun) {
-        for (let k = i; k < j; k++) {
-          out[k] = 0;
-        }
-      }
-      i = j;
-    }
-    return out;
-  }
-  
-  _countDirectionChanges(states) {
-    const directionChanges = [];
-    for (let i = 1; i < states.length; i++) {
-      if ((states[i - 1] === 0 || states[i - 1] === -1) && states[i] === 1) {
-        directionChanges.push(i);
-      } else if ((states[i - 1] === 0 || states[i - 1] === 1) && states[i] === -1) {
-        directionChanges.push(i);
-      }
-    }
-    return directionChanges;
-  }
-  
-  _checkRotation(samples) {
-    if (samples.length < 10) return 0;
-    
-    let totalAngleChange = 0;
-    let consistentDirection = 0;
-    let lastDirection = 0;
-    
-    for (let i = 1; i < samples.length; i++) {
-      const curr = samples[i].smoothAccel;
-      const prev = samples[i-1].smoothAccel;
-      
-      const angle1 = Math.atan2(prev.y - this.circleCenter.y, prev.x - this.circleCenter.x);
-      const angle2 = Math.atan2(curr.y - this.circleCenter.y, curr.x - this.circleCenter.x);
-      
-      let deltaAngle = angle2 - angle1;
-      if (deltaAngle > Math.PI) deltaAngle -= TAU;
-      if (deltaAngle < -Math.PI) deltaAngle += TAU;
-      
-      if (Math.abs(deltaAngle) > 0.02) {
-        totalAngleChange += Math.abs(deltaAngle);
-        const direction = Math.sign(deltaAngle);
-        
-        if (lastDirection === 0) lastDirection = direction;
-        else if (direction === lastDirection) consistentDirection++;
-      }
-    }
-    
-    const rotationAmount = Math.min(1, totalAngleChange / (Math.PI * 0.5));
-    const directionConsistency = samples.length > 5 ? consistentDirection / (samples.length - 1) : 0;
-    
-    return rotationAmount * (0.3 + 0.7 * directionConsistency);
-  }
-  
-  _detectShakes(sample) {
-    if (this.motionHistory.length < 10) return;
-    
-    // Analyze rapid acceleration changes (characteristic of shaking)
-    const recent = this.motionHistory.slice(-20); // Last 0.4 seconds
-    
-    let rapidChangeCount = 0;
-    let totalAccelChange = 0;
-    let avgFrequency = 0;
-    
-    for (let i = 1; i < recent.length; i++) {
-      const curr = recent[i];
-      const prev = recent[i-1];
-      
-      // Calculate acceleration change
-      const accelChange = Math.sqrt(
-        (curr.smoothAccel.x - prev.smoothAccel.x)**2 +
-        (curr.smoothAccel.y - prev.smoothAccel.y)**2
-      );
-      
-      totalAccelChange += accelChange;
-      
-      // Check for rapid direction changes (shaking pattern)
-      if (accelChange > 1.0) {
-        rapidChangeCount++;
-      }
-      
-      // Estimate frequency from zero crossings
-      const dotProduct = curr.smoothAccel.x * prev.smoothAccel.x + 
-                        curr.smoothAccel.y * prev.smoothAccel.y;
-      if (dotProduct < 0 && (curr.accelMag > 0.5 && prev.accelMag > 0.5)) {
-        avgFrequency += 1.0 / Math.max(0.02, curr.dt);
-      }
-    }
-    
-    // Calculate shake metrics
-    const changeRate = rapidChangeCount / recent.length;
-    const avgAccelChange = totalAccelChange / recent.length;
-    this.shakeFrequency = avgFrequency / Math.max(1, recent.length - 1);
-    
-    // Shake intensity based on change rate and magnitude
-    this.shakeIntensity = Math.min(1, (changeRate * 2 + avgAccelChange / 3) * 0.5);
-    
-    // Detect shake event
-    if (this.shakeIntensity > 0.6 && 
-        this.shakeFrequency > this.shakeMinFreq && 
-        sample.accelMag > this.shakeThreshold) {
-      
-      if (this.shakeStartTime === 0) {
-        this.shakeStartTime = sample.time;
-      } else if (sample.time - this.shakeStartTime > 200) { // 200ms minimum shake duration
-        this._onShakeDetected(this.shakeIntensity, this.shakeFrequency);
-        this.shakeStartTime = sample.time; // Reset for next shake
-      }
-    } else if (this.shakeIntensity < 0.3) {
-      this.shakeStartTime = 0; // Reset if shaking stops
-    }
-  }
-  
-  _resetCircleDetection() {
-    this.circleProgress = 0;
-    this.totalRotation = 0;
-    this.lastAngle = null;
-    this.circleStartTime = 0;
-    this.circleQuality = 0;
-  }
-  
-  _updateVisualization(sample) {
-    // Draw motion path
-    const scale = 50; // Scale factor for visualization
-    const x = this.centerX + (sample.smoothAccel.x * scale);
-    const y = this.centerY + (sample.smoothAccel.y * scale);
-    
-    // Color based on dominant motion type
-    let hue = 120; // Default green
-    if (this.shakeIntensity > 0.5) hue = 15; // Orange for shake
-    else if (this.circleQuality > 0.4) hue = 200; // Blue for circle
-    
-    this.ctx.strokeStyle = `hsl(${hue}, 70%, 60%)`;
-    this.ctx.globalAlpha = 0.7;
-    
-    if (!this.pathStarted || this.motionHistory.length < 2) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(x, y);
-      this.pathStarted = true;
-    } else {
-      this.ctx.lineTo(x, y);
-      this.ctx.stroke();
-    }
-    
-    // Update dot position
-    this.dot.style.transform = `translate(${x - this.centerX}px, ${y - this.centerY}px)`;
-  }
-  
-  _updateUI() {
-    // Progress bars
-    const circleBar = document.getElementById('circleBar');
-    const shakeBar = document.getElementById('shakeBar');
-    
-    if (circleBar) circleBar.style.width = `${Math.round(this.circleProgress * 100)}%`;
-    if (shakeBar) shakeBar.style.width = `${Math.round(this.shakeIntensity * 100)}%`;
-    
-    // Data display
-    const updates = {
-      'motionType': this.shakeIntensity > 0.5 ? 'Shaking' : 
-                   this.circleQuality > 0.4 ? 'Circular' : 'Linear',
-      'circleScore': `${Math.round(this.circleQuality * 100)}%`,
-      'shakeScore': `${Math.round(this.shakeIntensity * 100)}%`,
-      'angularVel': this.lastAngle !== null ? `${Math.round(Math.abs(this.totalRotation) * DEG / Math.max(0.1, (this.lastTime - this.circleStartTime) / 1000))} °/s` : '0 °/s',
-      'frequency': `${this.shakeFrequency.toFixed(1)} Hz`,
-      'radius': `${Math.round(this.circleRadius * 100)} cm`
-    };
-    
-    Object.entries(updates).forEach(([id, value]) => {
-      const el = document.getElementById(id);
-      if (el) el.textContent = value;
-    });
-  }
-  
-  _onCircleDetected(duration, radius, quality) {
-    console.log('🔄 Circle detected!', { duration, radius, quality });
-    
-    // Visual feedback
-    document.body.style.background = 'linear-gradient(135deg,#2196F3 0%,#03DAC6 100%)';
-    setTimeout(() => {
-      document.body.style.background = 'linear-gradient(135deg,#667eea 0%,#764ba2 100%)';
-    }, 600);
-    
-    // Status update
-    const status = document.getElementById('status');
-    if (status) {
-      status.textContent = '🔄 Circle motion detected!';
-      status.className = 'status circle';
-      setTimeout(() => {
-        status.textContent = 'Ready! Make circles or shakes';
-        status.className = 'status active';
-      }, 1500);
-    }
-    
-    // Add to history
-    this._addToHistory('circle', `Circle: ${duration.toFixed(1)}s, ${Math.round(radius*100)}cm, ${Math.round(quality*100)}%`);
-    
-    // Haptic feedback
-    if ('vibrate' in navigator) navigator.vibrate([100, 50, 100, 50, 100]);
-    
-    // Fire custom event
-    window.dispatchEvent(new CustomEvent('circleDetected', { 
-      detail: { duration, radius, quality } 
-    }));
-    
-    this._resetCircleDetection();
-  }
-  
-  _onShakeDetected(intensity, frequency) {
-    console.log('🤝 Shake detected!', { intensity, frequency });
-    
-    // Visual feedback  
-    document.body.style.background = 'linear-gradient(135deg,#FF5722 0%,#FF9800 100%)';
-    setTimeout(() => {
-      document.body.style.background = 'linear-gradient(135deg,#667eea 0%,#764ba2 100%)';
-    }, 400);
-    
-    // Status update
-    const status = document.getElementById('status');
-    if (status) {
-      status.textContent = '🤝 Shake motion detected!';
-      status.className = 'status shake';
-      setTimeout(() => {
-        status.textContent = 'Ready! Make circles or shakes';
-        status.className = 'status active';
-      }, 1200);
-    }
-    
-    // Add to history
-    this._addToHistory('shake', `Shake: intensity ${Math.round(intensity*100)}%, ${frequency.toFixed(1)}Hz`);
-    
-    // Haptic feedback
-    if ('vibrate' in navigator) navigator.vibrate([80, 40, 80]);
-    
-    // Fire custom event  
-    window.dispatchEvent(new CustomEvent('shakeDetected', { 
-      detail: { intensity, frequency } 
-    }));
-  }
-  
-  _addToHistory(type, text) {
-    const history = document.getElementById('history');
-    if (history) {
-      const div = document.createElement('div');
-      div.className = `detection-item ${type}`;
-      div.textContent = `${new Date().toLocaleTimeString()}: ${text}`;
-      history.appendChild(div);
-      history.scrollTop = history.scrollHeight;
-    }
-  }
-}
 
-// Global state
-let detector = null;
-let isActive = false;
+        // Handle page visibility changes
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden && detector.isListening) {
+                // Optionally pause detection when page is hidden
+                console.log('Page hidden - detection continues');
+            }
+        });
 
-// Tries to get devicemotion silently. Only falls back to requestPermission if needed.
-async function ensureMotionAccess() {
-  // No API? Nothing to do.
-  if (!('DeviceMotionEvent' in window)) return true;
-
-  // Some browsers don’t need/implement requestPermission at all.
-  const needsPerm = typeof DeviceMotionEvent.requestPermission === 'function';
-  if (!needsPerm) return true;
-
-  // Try to observe an event without prompting (if the site is already allowed).
-  return new Promise((resolve) => {
-    let got = false;
-    const probe = () => { got = true; window.removeEventListener('devicemotion', probe); resolve(true); };
-    window.addEventListener('devicemotion', probe, { passive: true });
-
-    // If nothing after a short wait, request in the same user gesture.
-    setTimeout(async () => {
-      if (got) return; // events already flowing; no prompt needed
-      try {
-        const res = await DeviceMotionEvent.requestPermission();
-        resolve(res === 'granted');
-      } catch {
-        resolve(false);
-      }
-    }, 400);
-  });
-}
-
-
-async function startDetection() {
-  if (isActive) return;
-
-  // Try silent access first; only prompt if truly required.
-  const ok = await ensureMotionAccess();
-  if (!ok) {
-    const n = document.getElementById('sensorNotice');
-    if (n) n.style.display = 'block';
-    return;
-  }
-
-  const canvas = document.getElementById('pathCanvas');
-  const dot = document.getElementById('motionDot');
-  detector = new MotionDetector(canvas, dot);
-
-  window.addEventListener('devicemotion', onMotionEvent, { passive: true });
-  isActive = true;
-
-  const status = document.getElementById('status');
-  if (status) {
-    status.textContent = 'Calibrating... hold still';
-    status.className = 'status';
-  }
-
-  document.getElementById('startBtn').style.display = 'none';
-  document.getElementById('stopBtn').style.display = 'inline-block';
-
-  // Lightweight sanity check that data is coming
-  let hasData = false;
-  const mark = () => { hasData = true; };
-  window.addEventListener('devicemotion', mark, { passive: true });
-  setTimeout(() => {
-    window.removeEventListener('devicemotion', mark);
-    if (!hasData) {
-      const n = document.getElementById('sensorNotice');
-      if (n) n.style.display = 'block';
-    }
-  }, 1200);
-}
-
-
-function stopDetection() {
-  if (!isActive) return;
-  
-  window.removeEventListener('devicemotion', onMotionEvent);
-  isActive = false;
-  
-  const status = document.getElementById('status');
-  if (status) {
-    status.textContent = 'Detection stopped';
-    status.className = 'status';
-  }
-  
-  document.getElementById('startBtn').style.display = 'inline-block';
-  document.getElementById('stopBtn').style.display = 'none';
-}
-
-function onMotionEvent(event) {
-  if (!detector) return;
-
-  // Normalize motion fields (some browsers return nulls)
-  const a  = event.acceleration || null;
-  const ag = event.accelerationIncludingGravity || null;
-  const rr = event.rotationRate || null;
-
-  const accel = a
-    ? { x: a.x || 0, y: a.y || 0, z: a.z || 0 }
-    : null;
-
-  const accelG = ag
-    ? { x: ag.x || 0, y: ag.y || 0, z: ag.z || 0 }
-    : null;
-
-  // rotationRate (deg/s). We pass through; the detector mainly uses accel deltas.
-  const rot = rr
-    ? { alpha: rr.alpha || 0, beta: rr.beta || 0, gamma: rr.gamma || 0 }
-    : null;
-
-  // Lazy-init smoothers to avoid NaNs on the first frame
-  if (!detector.smoothedAccel) detector.smoothedAccel = { x: 0, y: 0 };
-  if (!detector.prevAccel)     detector.prevAccel     = { x: 0, y: 0 };
-
-  detector.addMotionSample(accel, accelG, rot, performance.now());
-}
-
-function clearHistory() {
-  const history = document.getElementById('history');
-  if (history) history.innerHTML = '';
-  // Reset visual/progress state
-  if (detector) detector._resetDetection();
-}
-
-// Keep canvas crisp on orientation/resize
-window.addEventListener('resize', () => {
-  if (detector && detector._setupCanvas) detector._setupCanvas();
-});
-</script>
+        // Initial setup message
+        console.log('Double Back Tap Detector loaded. Click Start Detection to begin.');
+    </script>
 </body>
 </html>
