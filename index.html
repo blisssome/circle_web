@@ -184,14 +184,14 @@
                 // Detection parameters
                 this.bufferSize = 100;
                 this.tapThreshold = 10; // m/s²
-                this.doubleTapWindow = 500; // milliseconds
+                this.doubleTapWindow = 300; // milliseconds
                 this.cooldownPeriod = 300; // milliseconds
                 this.minTapDuration = 30; // milliseconds
                 this.maxTapDuration = 200; // milliseconds
                 
                 // Rate limiter
                 this.lastDetectionTime = 0;
-                this.rateLimitDelay = 1000; // 1 second
+                this.rateLimitDelay = 500; // 1 second
                 
                 this.updateElements();
             }
