@@ -186,12 +186,12 @@
                 this.tapThreshold = 8; // m/s²
                 this.doubleTapWindow = 300; // milliseconds
                 this.cooldownPeriod = 300; // milliseconds
-                this.minTapDuration = 30; // milliseconds
-                this.maxTapDuration = 200; // milliseconds
+                this.minTapDuration = 10; // milliseconds
+                this.maxTapDuration = 500; // milliseconds
                 
                 // Rate limiter
                 this.lastDetectionTime = 0;
-                this.rateLimitDelay = 500; // 1 second
+                this.rateLimitDelay = 100; // 1 second
                 
                 this.updateElements();
             }
